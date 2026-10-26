@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Kanawanagasaki.Base122/Kanawanagasaki.Base122.csproj" />
+  <Project Path="Kanawanagasaki.Base122.Tests/Kanawanagasaki.Base122.Tests.csproj" />
+</Solution>
+

@@ -1,0 +1,22 @@
+[package]
+authors = ["lhear"]
+categories = ["encoding", "algorithms", "no-std"]
+description = "High-performance Base122 codec with ~14% overhead (Base64: 33%); AVX2 and NEON acceleration with scalar fallback."
+documentation = "https://docs.rs/base122-fast"
+edition = "2024"
+keywords = ["encoding", "base122", "binary-to-text", "performance", "serialization"]
+license = "MIT"
+name = "base122-fast"
+readme = "README.md"
+version = "0.1.4"
+
+[profile.release]
+codegen-units = 1
+
+[dev-dependencies]
+criterion = "0.8.2"
+rand = "0.10.2"
+
+[[bench]]
+harness = false
+name = "bench"
