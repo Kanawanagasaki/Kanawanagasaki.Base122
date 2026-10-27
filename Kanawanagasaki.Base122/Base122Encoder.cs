@@ -37,8 +37,11 @@ public sealed class Base122Encoder : Stream
     private const int DefaultBufferSize = 8192;
     private const int MaxStackallocChars = 512;
 
-    /// <summary>Inputs up to this size are encoded in place via <see cref="string.Create{TState}(int, TState, System.Buffers.SpanAction{char, TState})"/>; larger ones use a pooled buffer.</summary>
-    private const int SingleAllocEncodeThreshold = 64 * 1024;
+    /// <summary>Work buffers above ArrayPool's largest bucket (2^20) would not be pooled — those inputs go through the streaming path instead.</summary>
+    private const int MaxPooledRentBytes = 1 << 20;
+
+    /// <summary>Staging buffer for the streaming path: large enough that base-Stream per-write task overhead is negligible, small enough to stay bounded.</summary>
+    private const int LargePathStagingBytes = 64 * 1024;
 
     private readonly Stream _output;
     private byte[] _buffer = null!;
@@ -51,6 +54,10 @@ public sealed class Base122Encoder : Stream
     private int _pendingIllegal;
     private bool _completed;
     private bool _disposed;
+    private long _writtenTotal;
+
+    /// <summary>Number of encoded bytes written to the output stream since construction or the last <see cref="Reset"/> (internal: used by the static destination overloads).</summary>
+    internal long BytesWritten => _writtenTotal + _buffered;
 
     /// <summary>Creates an encoder that writes Base122 text (UTF-8) to <paramref name="output"/>.</summary>
     /// <remarks>The output stream is disposed together with the encoder.</remarks>
@@ -377,6 +384,7 @@ public sealed class Base122Encoder : Stream
         _pendingIllegal = 0;
         _buffered = 0;
         _completed = false;
+        _writtenTotal = 0;
     }
 
     /// <summary>
@@ -536,6 +544,7 @@ public sealed class Base122Encoder : Stream
     {
         if (_buffered > 0)
         {
+            _writtenTotal += _buffered;
             _output.Write(_buffer, 0, _buffered);
             _buffered = 0;
         }
@@ -615,6 +624,7 @@ public sealed class Base122Encoder : Stream
     {
         if (_buffered > 0)
         {
+            _writtenTotal += _buffered;
             await _output.WriteAsync(_buffer.AsMemory(0, _buffered), cancellationToken).ConfigureAwait(false);
             _buffered = 0;
         }
@@ -642,28 +652,10 @@ public sealed class Base122Encoder : Stream
     /// Encodes binary data into a Base122 string.
     /// The output is valid UTF-8 and adds ~14% size overhead (Base64 adds 33%).
     /// </summary>
-    /// <remarks>
-    /// Inputs up to 64 KB are encoded in place via <see cref="string.Create{TState}(int, TState, System.Buffers.SpanAction{char, TState})"/>
-    /// after computing the exact encoded length — a single allocation. Larger
-    /// inputs skip the length pre-pass and encode into a pooled buffer instead.
-    /// </remarks>
     public static string Encode(byte[] data)
     {
         ArgumentNullException.ThrowIfNull(data);
-        if (data.Length == 0)
-            return string.Empty;
-
-        if (data.Length <= SingleAllocEncodeThreshold)
-        {
-            int charCount = GetEncodedLength(data.AsSpan());
-            return string.Create(charCount, data, static (chars, source) =>
-            {
-                int written = Base122Core.Encode(source, chars);
-                System.Diagnostics.Debug.Assert(written == chars.Length, "Base122 length estimate must be exact.");
-            });
-        }
-
-        return Encode((ReadOnlySpan<byte>)data);
+        return Encode(data.AsSpan());
     }
 
     /// <summary>
@@ -671,33 +663,30 @@ public sealed class Base122Encoder : Stream
     /// The output is valid UTF-8 and adds ~14% size overhead (Base64 adds 33%).
     /// </summary>
     /// <remarks>
-    /// The data is encoded into a pooled buffer sized for the worst case and
-    /// copied into the result string without a length pre-pass.
+    /// Inputs whose encoded output fits in 512 characters are encoded on the
+    /// stack; all other inputs are encoded in place via
+    /// <see cref="string.Create{TState}(int, TState, System.Buffers.SpanAction{char, TState})"/>
+    /// after computing the exact encoded length — a single allocation either way.
     /// </remarks>
     public static string Encode(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty)
             return string.Empty;
 
-        int max = GetMaxEncodedLength(data.Length);
-
-        if (max <= MaxStackallocChars)
+        if (GetMaxEncodedLength(data.Length) <= MaxStackallocChars)
         {
             Span<char> buffer = stackalloc char[MaxStackallocChars];
             int written = Base122Core.Encode(data, buffer);
             return new string(buffer[..written]);
         }
 
-        char[] rented = ArrayPool<char>.Shared.Rent(max);
-        try
+        // Exact length in one pass, then a single string allocation.
+        int charCount = GetEncodedLength(data);
+        return string.Create(charCount, data, static (chars, source) =>
         {
-            int written = Base122Core.Encode(data, rented);
-            return new string(rented, 0, written);
-        }
-        finally
-        {
-            ArrayPool<char>.Shared.Return(rented);
-        }
+            int written = Base122Core.Encode(source, chars);
+            System.Diagnostics.Debug.Assert(written == chars.Length, "Base122 length estimate must be exact.");
+        });
     }
 
     /// <summary>
@@ -727,9 +716,9 @@ public sealed class Base122Encoder : Stream
     /// but without materializing any string or character data.
     /// </summary>
     /// <remarks>
-    /// Inputs up to 64 KB are encoded into an exactly sized array after
-    /// computing the exact encoded length — a single allocation. Larger inputs
-    /// encode into a pooled buffer and are copied to the result.
+    /// The exact encoded length is computed in one pass, then a single
+    /// right-sized array is allocated and encoded into — the result is the
+    /// only allocation.
     /// </remarks>
     public static byte[] EncodeToUtf8(byte[] data)
     {
@@ -742,30 +731,20 @@ public sealed class Base122Encoder : Stream
     /// the same bytes <see cref="Encode(ReadOnlySpan{byte})"/> would produce as
     /// a string, but without materializing any string or character data.
     /// </summary>
+    /// <remarks>
+    /// The exact encoded length is computed in one pass, then a single
+    /// right-sized array is allocated and encoded into — the result is the
+    /// only allocation.
+    /// </remarks>
     public static byte[] EncodeToUtf8(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty)
             return [];
 
-        if (data.Length <= SingleAllocEncodeThreshold)
-        {
-            // Exact length in one pass, then a single right-sized allocation.
-            byte[] result = new byte[GetEncodedToUtf8Length(data)];
-            int written = Base122Core.EncodeToUtf8(data, result);
-            System.Diagnostics.Debug.Assert(written == result.Length, "Base122 length estimate must be exact.");
-            return result;
-        }
-
-        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxEncodedToUtf8Length(data.Length));
-        try
-        {
-            int written = Base122Core.EncodeToUtf8(data, rented);
-            return rented.AsSpan(0, written).ToArray();
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
+        byte[] result = new byte[GetEncodedToUtf8Length(data)];
+        int written = Base122Core.EncodeToUtf8(data, result);
+        System.Diagnostics.Debug.Assert(written == result.Length, "Base122 length estimate must be exact.");
+        return result;
     }
 
     /// <summary>
@@ -797,6 +776,12 @@ public sealed class Base122Encoder : Stream
     /// <param name="data">The binary data to encode.</param>
     /// <param name="destination">The stream receiving the encoded UTF-8 bytes.</param>
     /// <returns>The number of encoded bytes written to the stream.</returns>
+    /// <remarks>
+    /// Inputs whose encoded output fits in 1 MB are encoded into a pooled
+    /// buffer and written in one call — no steady-state allocation. Larger
+    /// inputs are streamed through a <see cref="Base122Encoder"/> with a
+    /// pooled 8 KB staging buffer, keeping the working set bounded.
+    /// </remarks>
     public static int EncodeToUtf8(ReadOnlySpan<byte> data, Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -805,16 +790,33 @@ public sealed class Base122Encoder : Stream
         if (data.IsEmpty)
             return 0;
 
-        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxEncodedToUtf8Length(data.Length));
+        int max = GetMaxEncodedToUtf8Length(data.Length);
+        if (max <= MaxPooledRentBytes)
+        {
+            byte[] rented = ArrayPool<byte>.Shared.Rent(max);
+            try
+            {
+                int written = Base122Core.EncodeToUtf8(data, rented);
+                destination.Write(rented, 0, written);
+                return written;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        byte[] staging = ArrayPool<byte>.Shared.Rent(LargePathStagingBytes);
         try
         {
-            int written = Base122Core.EncodeToUtf8(data, rented);
-            destination.Write(rented, 0, written);
-            return written;
+            using var encoder = new Base122Encoder(destination, staging, leaveOpen: true);
+            encoder.Write(data);
+            encoder.Complete();
+            return (int)encoder.BytesWritten;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            ArrayPool<byte>.Shared.Return(staging);
         }
     }
 
@@ -839,21 +841,55 @@ public sealed class Base122Encoder : Stream
 
     /// <summary>
     /// Encodes binary data and asynchronously writes the UTF-8 byte form of
-    /// the Base122 text to <paramref name="destination"/>, using the
-    /// encoder's buffered async writes.
+    /// the Base122 text to <paramref name="destination"/>.
     /// </summary>
     /// <param name="data">The binary data to encode.</param>
     /// <param name="destination">The stream receiving the encoded UTF-8 bytes.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    public static async Task EncodeToUtf8Async(ReadOnlyMemory<byte> data, Stream destination, CancellationToken cancellationToken = default)
+    /// <returns>The number of encoded bytes written to the stream.</returns>
+    /// <remarks>
+    /// Inputs whose encoded output fits in 1 MB are encoded into a pooled
+    /// buffer and written with a single async write — no steady-state
+    /// allocation. Larger inputs are streamed through a
+    /// <see cref="Base122Encoder"/> with a pooled 8 KB staging buffer, keeping
+    /// the working set bounded while awaiting the destination.
+    /// </remarks>
+    public static async Task<int> EncodeToUtf8Async(ReadOnlyMemory<byte> data, Stream destination, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(destination);
         if (!destination.CanWrite)
             throw new NotSupportedException("The destination stream must be writable.");
+        if (data.IsEmpty)
+            return 0;
 
-        await using var encoder = new Base122Encoder(destination, leaveOpen: true);
-        await encoder.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-        await encoder.CompleteAsync(cancellationToken).ConfigureAwait(false);
+        int max = GetMaxEncodedToUtf8Length(data.Length);
+        if (max <= MaxPooledRentBytes)
+        {
+            byte[] rented = ArrayPool<byte>.Shared.Rent(max);
+            try
+            {
+                int written = Base122Core.EncodeToUtf8(data.Span, rented);
+                await destination.WriteAsync(rented.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+                return written;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        byte[] staging = ArrayPool<byte>.Shared.Rent(LargePathStagingBytes);
+        try
+        {
+            await using var encoder = new Base122Encoder(destination, staging, leaveOpen: true);
+            await encoder.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+            await encoder.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            return (int)encoder.BytesWritten;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(staging);
+        }
     }
 
     /// <summary>

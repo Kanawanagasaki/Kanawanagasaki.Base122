@@ -7,7 +7,7 @@
 
     <!-- Package metadata -->
     <PackageId>Kanawanagasaki.Base122</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <Authors>Kanawanagasaki</Authors>
     <Description>High-performance Base122 binary-to-text encoding (UTF-8 safe, ~14% overhead; Base64 adds 33%) with span-based and streaming APIs. C# port of the Rust base122-fast scalar codec.</Description>
     <PackageTags>base122;binary-to-text;encoding;utf8;utf-8;base64-alternative;span;stream;performance</PackageTags>

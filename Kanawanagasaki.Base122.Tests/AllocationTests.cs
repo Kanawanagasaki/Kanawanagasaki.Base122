@@ -39,13 +39,14 @@ public class AllocationTests
     }
 
     [Fact]
-    public void Encode_LargeSpan_UsesPooledBufferOnly()
+    public void Encode_LargeSpan_AllocatesOnlyTheString()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xB0B, 100_000);
+        string expected = Base122Encoder.Encode(data.AsSpan());
 
         long allocated = AllocatedBytes(() => Base122Encoder.Encode(data.AsSpan()));
-        // Only the result string (~228 KB) plus slack; no intermediate copies.
-        Assert.InRange(allocated, 0, 300_000);
+        // Exact-length string.Create: only the result string (~228 KB).
+        Assert.InRange(allocated, expected.Length * 2, expected.Length * 2 + 2048);
     }
 
     [Fact]
@@ -211,4 +212,110 @@ public class AllocationTests
         Assert.Equal(data, decoded);
         Assert.Equal(0, allocated);
     }
+
+    /// <summary>
+    /// Runs an async destination overload and measures its allocations,
+    /// provided it completes synchronously (MemoryStream destinations do —
+    /// every await inside completes synchronously). Returns the allocated
+    /// bytes and the method result.
+    /// </summary>
+    private static (long Allocated, int Result) MeasureAsyncAllocations(ReadOnlyMemory<byte> payload, Func<ReadOnlyMemory<byte>, Stream, CancellationToken, Task<int>> call)
+    {
+        const int warmups = 3;
+        for (int i = 0; i < warmups; i++)
+        {
+            using var sink = new MemoryStream(payload.Length * 2);
+            Task<int> warm = call(payload, sink, CancellationToken.None);
+            Assert.True(warm.IsCompleted, "Warm-up call did not complete synchronously.");
+        }
+
+        using var destination = new MemoryStream(payload.Length * 2);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Task<int> task = call(payload, destination, CancellationToken.None);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(task.IsCompleted, "Measured call did not complete synchronously; thread-hopped allocations are not measured.");
+        return (allocated, task.Result);
+    }
+
+    [Fact]
+    public void EncodeToUtf8Async_DestinationStream_Small_DoesNotAllocate()
+    {
+        byte[] data = TestHelpers.RandomBytesArray(0xA551AC, 8_000);
+
+        (long allocated, int written) = MeasureAsyncAllocations(
+            data, (p, s, ct) => Base122Encoder.EncodeToUtf8Async(p, s, ct));
+
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data).Length, written);
+        // Only the completed Task<int> and state-machine remainders; the work
+        // buffer is a pooled rent (pre-warmed by the calls above).
+        Assert.InRange(allocated, 0, AsyncAllocBudget(512));
+    }
+
+#if DEBUG
+    [Fact(Skip = "Strict async allocation budgets are Release-verified. Unoptimized Debug JIT boxes the per-await state machines of the streaming pump (~80 B per decoded byte), which is a Debug artifact, not library behavior.")]
+#else
+    [Fact]
+#endif
+    public void EncodeToUtf8Async_DestinationStream_Large_BoundedWorkingSet()
+    {
+        const int size = 10 * 1024 * 1024;
+        byte[] data = TestHelpers.RandomBytesArray(0xB16B1E, size);
+
+        (long allocated, int written) = MeasureAsyncAllocations(
+            data, (p, s, ct) => Base122Encoder.EncodeToUtf8Async(p, s, ct));
+
+        // Above the pooled-rent threshold the async encoder streams through a
+        // pooled 64 KB staging buffer — nothing proportional to the input.
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data).Length, written);
+        Assert.InRange(allocated, 0, AsyncAllocBudget(64 * 1024));
+    }
+
+    [Fact]
+    public void DecodeFromUtf8Async_DestinationStream_Small_DoesNotAllocate()
+    {
+        byte[] data = TestHelpers.RandomBytesArray(0xDEA5C, 8_000);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
+
+        (long allocated, int written) = MeasureAsyncAllocations(
+            encoded, (p, s, ct) => Base122Decoder.DecodeFromUtf8Async(p, s, ct));
+
+        Assert.Equal(data.Length, written);
+        Assert.InRange(allocated, 0, AsyncAllocBudget(512));
+    }
+
+#if DEBUG
+    [Fact(Skip = "Strict async allocation budgets are Release-verified. Unoptimized Debug JIT boxes the per-await state machines of the streaming pump (~80 B per decoded byte), which is a Debug artifact, not library behavior.")]
+#else
+    [Fact]
+#endif
+    public void DecodeFromUtf8Async_DestinationStream_Large_BoundedWorkingSet()
+    {
+        const int size = 10 * 1024 * 1024;
+        byte[] encoded = Base122Encoder.EncodeToUtf8(TestHelpers.RandomBytesArray(0xB16B1D, size));
+
+        (long allocated, int written) = MeasureAsyncAllocations(
+            encoded, (p, s, ct) => Base122Decoder.DecodeFromUtf8Async(p, s, ct));
+
+        // Above the pooled-rent threshold the async decoder streams through
+        // pooled staging buffers — nothing proportional to the input.
+        Assert.Equal(size, written);
+        Assert.InRange(allocated, 0, AsyncAllocBudget(64 * 1024));
+    }
+
+    /// <summary>
+    /// Allocation budgets for async APIs. The two large-input tests are
+    /// skipped in Debug (see their Skip reason); these small-input budgets
+    /// hold in both configurations because their await count is bounded.
+    /// </summary>
+    private static long AsyncAllocBudget(long releaseBudget) =>
+#if DEBUG
+        releaseBudget * 4;
+#else
+        releaseBudget;
+#endif
 }

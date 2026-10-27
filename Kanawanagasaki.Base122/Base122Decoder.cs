@@ -33,6 +33,12 @@ public sealed class Base122Decoder : Stream
     private const int DefaultBufferSize = 8192;
     private const int MaxStackallocBytes = 512;
 
+    /// <summary>Work buffers above ArrayPool's largest bucket (2^20) would not be pooled — those inputs go through the streaming path instead.</summary>
+    private const int MaxPooledRentBytes = 1 << 20;
+
+    /// <summary>Staging buffer for the streaming path: large enough that base-Stream per-write task overhead is negligible, small enough to stay bounded.</summary>
+    private const int LargePathStagingBytes = 64 * 1024;
+
     private readonly Stream _input;
     private byte[] _buffer = null!;
     private readonly bool _leaveOpen;
@@ -652,6 +658,15 @@ public sealed class Base122Decoder : Stream
     /// invalid lead byte), an invalid continuation byte, or an escape sequence
     /// truncated by the end of the input.
     /// </exception>
+    /// <remarks>
+    /// Decodes into a pooled buffer sized
+    /// <see cref="GetMaxDecodedFromUtf8Length"/> and writes once — one pooled
+    /// rent, no steady-state allocation. (For inputs above ~1.2 MB the rent
+    /// exceeds ArrayPool's largest bucket and is a direct allocation; use the
+    /// async overload or the instance decoder to stream such inputs with a
+    /// bounded working set — a span cannot be captured by the streaming
+    /// decoder's input stream.)
+    /// </remarks>
     public static int DecodeFromUtf8(ReadOnlySpan<byte> encoded, Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -688,6 +703,13 @@ public sealed class Base122Decoder : Stream
     /// invalid lead byte), an invalid continuation byte, or an escape sequence
     /// truncated by the end of the input.
     /// </exception>
+    /// <remarks>
+    /// Inputs whose decoded output fits in 1 MB are decoded into a pooled
+    /// buffer and written with a single async write — no steady-state
+    /// allocation. Larger inputs are streamed through a
+    /// <see cref="Base122Decoder"/> with a pooled 8 KB staging buffer, keeping
+    /// the working set bounded.
+    /// </remarks>
     public static async Task<int> DecodeFromUtf8Async(ReadOnlyMemory<byte> encoded, Stream destination, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -696,17 +718,41 @@ public sealed class Base122Decoder : Stream
         if (encoded.IsEmpty)
             return 0;
 
-        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxDecodedFromUtf8Length(encoded.Length));
+        int max = GetMaxDecodedFromUtf8Length(encoded.Length);
+        if (max <= MaxPooledRentBytes)
+        {
+            byte[] rented = ArrayPool<byte>.Shared.Rent(max);
+            try
+            {
+                if (!Base122Core.DecodeFromUtf8(encoded.Span, rented, out int written, out int errorOffset))
+                    throw InvalidUtf8Input(encoded.Span, errorOffset);
+                await destination.WriteAsync(rented.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+                return written;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        byte[] inputStaging = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+        byte[] outStaging = ArrayPool<byte>.Shared.Rent(LargePathStagingBytes);
         try
         {
-            if (!Base122Core.DecodeFromUtf8(encoded.Span, rented, out int written, out int errorOffset))
-                throw InvalidUtf8Input(encoded.Span, errorOffset);
-            await destination.WriteAsync(rented.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
-            return written;
+            await using var decoder = new Base122Decoder(new MemoryInputStream(encoded), inputStaging, leaveOpen: true);
+            long total = 0;
+            int read;
+            while ((read = await decoder.ReadAsync(outStaging, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                await destination.WriteAsync(outStaging.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                total += read;
+            }
+            return (int)total;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            ArrayPool<byte>.Shared.Return(inputStaging);
+            ArrayPool<byte>.Shared.Return(outStaging);
         }
     }
 
@@ -778,6 +824,50 @@ public sealed class Base122Decoder : Stream
     {
         byte b = errorOffset < encoded.Length ? encoded[errorOffset] : (byte)0;
         return new FormatException($"Invalid Base122 input: invalid byte 0x{b:X2} at index {errorOffset}.");
+    }
+
+    /// <summary>
+    /// A forward-only read-only stream over <see cref="ReadOnlyMemory{Byte}"/>
+    /// (internal: lets the streaming decoder pump over in-memory input without
+    /// copying it into a MemoryStream first).
+    /// </summary>
+    private sealed class MemoryInputStream(ReadOnlyMemory<byte> memory) : Stream
+    {
+        private int _pos;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            // Complete synchronously: the source is already in memory, and the
+            // base fallback would suspend (allocating continuations) for no reason.
+            if (cancellationToken.IsCancellationRequested)
+                return ValueTask.FromCanceled<int>(cancellationToken);
+            return new ValueTask<int>(Read(buffer.Span));
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            int take = Math.Min(buffer.Length, memory.Length - _pos);
+            memory.Span.Slice(_pos, take).CopyTo(buffer);
+            _pos += take;
+            return take;
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static FormatException InvalidInput(ReadOnlySpan<char> encoded, int errorOffset)

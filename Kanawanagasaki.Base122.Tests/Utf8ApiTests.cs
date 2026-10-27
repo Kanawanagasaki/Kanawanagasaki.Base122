@@ -475,12 +475,13 @@ public class Utf8AllocationTests
     }
 
     [Fact]
-    public void EncodeToUtf8_Large_UsesPooledBufferOnly()
+    public void EncodeToUtf8_Large_AllocatesOnlyTheResult()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xB0B, 100_000);
+        byte[] expected = Base122Encoder.EncodeToUtf8(data);
 
         long allocated = AllocatedBytes(() => Base122Encoder.EncodeToUtf8(data));
-        // Result (~114 KB) plus one pooled rent; no intermediate copies.
-        Assert.InRange(allocated, 0, 300_000);
+        // Exact-length first: only the result array (~114 KB).
+        Assert.InRange(allocated, expected.Length, expected.Length + 64);
     }
 }
