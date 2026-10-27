@@ -1,11 +1,24 @@
+using System.Buffers;
 using System.Buffers.Binary;
 
 namespace Kanawanagasaki.Base122;
 
 /// <summary>
-/// A streaming Base122 encoder realized as a write-only <see cref="Stream"/>:
+/// Base122 binary-to-text encoding as a write-only <see cref="Stream"/>:
 /// raw bytes written to this stream are encoded as Base122 text (UTF-8) into
 /// the output stream supplied at construction.
+/// <para>
+/// Base122 is a UTF-8-safe encoding with only ~14% size overhead over raw
+/// bytes (Base64 adds 33%). See
+/// <see href="https://blog.kevinalbs.com/base122">the Base122 article</see>.
+/// Six ASCII code units (NUL, LF, CR, double quote, ampersand, backslash) never
+/// appear literally in the output; a 7-bit group that maps to one of them is
+/// emitted as a single two-byte UTF-8 character together with the following
+/// 7-bit group. The output of every encoding API is therefore valid UTF-8 text.
+/// </para>
+/// The class also hosts the static in-memory encode API
+/// (<see cref="Encode(byte[])"/>, <see cref="EncodeToUtf8(ReadOnlySpan{byte})"/>,
+/// including Stream, <see cref="IBufferWriter{Byte}"/> and async destinations).
 /// </summary>
 /// <remarks>
 /// Because the class is a <see cref="Stream"/>, other streams can pipe into
@@ -15,15 +28,20 @@ namespace Kanawanagasaki.Base122;
 /// written: the final (possibly zero-padded) group and any trailing escape are
 /// emitted by <see cref="Complete"/> or <see cref="CompleteAsync"/> — which
 /// <see cref="Dispose(bool)"/> and <see cref="DisposeAsync"/> call implicitly.
+/// <see cref="Reset"/> revives a completed encoder for the next chunk.
 /// </para>
 /// Instances are not thread-safe.
 /// </remarks>
 public sealed class Base122Encoder : Stream
 {
     private const int DefaultBufferSize = 8192;
+    private const int MaxStackallocChars = 512;
+
+    /// <summary>Inputs up to this size are encoded in place via <see cref="string.Create{TState}(int, TState, System.Buffers.SpanAction{char, TState})"/>; larger ones use a pooled buffer.</summary>
+    private const int SingleAllocEncodeThreshold = 64 * 1024;
 
     private readonly Stream _output;
-    private readonly byte[] _buffer;
+    private byte[] _buffer = null!;
     private readonly bool _leaveOpen;
 
     private int _buffered;
@@ -36,18 +54,36 @@ public sealed class Base122Encoder : Stream
 
     /// <summary>Creates an encoder that writes Base122 text (UTF-8) to <paramref name="output"/>.</summary>
     /// <remarks>The output stream is disposed together with the encoder.</remarks>
-    public Base122Encoder(Stream output) : this(output, leaveOpen: false) { }
+    public Base122Encoder(Stream output) : this(output, null, leaveOpen: false) { }
 
     /// <summary>Creates an encoder that writes Base122 text (UTF-8) to <paramref name="output"/>.</summary>
     /// <param name="output">The stream receiving the encoded text.</param>
     /// <param name="leaveOpen">When true, the output stream outlives this encoder.</param>
-    public Base122Encoder(Stream output, bool leaveOpen)
+    public Base122Encoder(Stream output, bool leaveOpen) : this(output, null, leaveOpen) { }
+
+    /// <summary>Creates an encoder that writes Base122 text (UTF-8) to <paramref name="output"/>.</summary>
+    /// <param name="output">The stream receiving the encoded text.</param>
+    /// <param name="buffer">
+    /// A caller-provided buffer used to stage encoded output before it is
+    /// written to <paramref name="output"/> — pass e.g.
+    /// <c>ArrayPool&lt;byte&gt;.Shared.Rent(8192)</c> and return it after
+    /// disposal to avoid library-side allocations entirely. When null, an
+    /// 8192-byte buffer is allocated on first use and reused for the
+    /// lifetime of the encoder.
+    /// </param>
+    /// <param name="leaveOpen">When true, the output stream outlives this encoder.</param>
+    public Base122Encoder(Stream output, byte[]? buffer, bool leaveOpen = false)
     {
         ArgumentNullException.ThrowIfNull(output);
+        if (buffer is { Length: 0 })
+            throw new ArgumentOutOfRangeException(nameof(buffer), "The buffer must not be empty.");
         _output = output;
+        _buffer = buffer!;
         _leaveOpen = leaveOpen;
-        _buffer = new byte[DefaultBufferSize];
     }
+
+    /// <summary>Allocates the staging buffer on first use (unless provided by the caller).</summary>
+    private void EnsureBuffer() => _buffer ??= new byte[DefaultBufferSize];
 
     #region Stream contract: write-only, non-seekable
 
@@ -174,6 +210,9 @@ public sealed class Base122Encoder : Stream
     public override void Write(ReadOnlySpan<byte> data)
     {
         ThrowIfWritable();
+        if (data.IsEmpty)
+            return;
+        EnsureBuffer();
 
         int i = 0;
 
@@ -248,6 +287,9 @@ public sealed class Base122Encoder : Stream
         ThrowIfWritable();
         if (cancellationToken.IsCancellationRequested)
             return ValueTask.FromCanceled(cancellationToken);
+        if (buffer.IsEmpty)
+            return ValueTask.CompletedTask;
+        EnsureBuffer();
         return WriteAsyncCore(buffer, cancellationToken);
     }
 
@@ -263,6 +305,7 @@ public sealed class Base122Encoder : Stream
         ThrowIfWritable();
         if (cancellationToken.IsCancellationRequested)
             return Task.FromCanceled(cancellationToken);
+        EnsureBuffer();
         return WriteAsyncCore(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
@@ -309,6 +352,31 @@ public sealed class Base122Encoder : Stream
             _acc = (_acc << 8) | data.Span[i++];
             _accBits += 8;
         }
+    }
+
+    /// <summary>
+    /// Clears the encoder state so the same instance can encode another chunk
+    /// into the same output stream — e.g. interleaving your own framing bytes
+    /// (borders, length prefixes) between encoded chunks.
+    /// </summary>
+    /// <remarks>
+    /// Any buffered output is flushed to the underlying stream first; the bit
+    /// stream of a chunk ended by <see cref="Complete"/> is already final, so
+    /// <see cref="Reset"/> only revives the encoder. Unfinalized bit state
+    /// (a chunk not ended by <see cref="Complete"/>) is discarded — call
+    /// <see cref="Complete"/> instead when the trailing data should be
+    /// encoded. The underlying stream is neither closed nor disposed.
+    /// </remarks>
+    public void Reset()
+    {
+        ThrowIfDisposed();
+        FlushBuffer();
+        _acc = 0;
+        _accBits = 0;
+        _hasPendingIllegal = false;
+        _pendingIllegal = 0;
+        _buffered = 0;
+        _completed = false;
     }
 
     /// <summary>
@@ -567,4 +635,394 @@ public sealed class Base122Encoder : Stream
         if (_disposed)
             throw new ObjectDisposedException(nameof(Base122Encoder));
     }
+
+    #region Static in-memory encode API
+
+    /// <summary>
+    /// Encodes binary data into a Base122 string.
+    /// The output is valid UTF-8 and adds ~14% size overhead (Base64 adds 33%).
+    /// </summary>
+    /// <remarks>
+    /// Inputs up to 64 KB are encoded in place via <see cref="string.Create{TState}(int, TState, System.Buffers.SpanAction{char, TState})"/>
+    /// after computing the exact encoded length — a single allocation. Larger
+    /// inputs skip the length pre-pass and encode into a pooled buffer instead.
+    /// </remarks>
+    public static string Encode(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (data.Length == 0)
+            return string.Empty;
+
+        if (data.Length <= SingleAllocEncodeThreshold)
+        {
+            int charCount = GetEncodedLength(data.AsSpan());
+            return string.Create(charCount, data, static (chars, source) =>
+            {
+                int written = Base122Core.Encode(source, chars);
+                System.Diagnostics.Debug.Assert(written == chars.Length, "Base122 length estimate must be exact.");
+            });
+        }
+
+        return Encode((ReadOnlySpan<byte>)data);
+    }
+
+    /// <summary>
+    /// Encodes binary data into a Base122 string.
+    /// The output is valid UTF-8 and adds ~14% size overhead (Base64 adds 33%).
+    /// </summary>
+    /// <remarks>
+    /// The data is encoded into a pooled buffer sized for the worst case and
+    /// copied into the result string without a length pre-pass.
+    /// </remarks>
+    public static string Encode(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty)
+            return string.Empty;
+
+        int max = GetMaxEncodedLength(data.Length);
+
+        if (max <= MaxStackallocChars)
+        {
+            Span<char> buffer = stackalloc char[MaxStackallocChars];
+            int written = Base122Core.Encode(data, buffer);
+            return new string(buffer[..written]);
+        }
+
+        char[] rented = ArrayPool<char>.Shared.Rent(max);
+        try
+        {
+            int written = Base122Core.Encode(data, rented);
+            return new string(rented, 0, written);
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Encodes binary data into a caller-provided buffer.
+    /// <paramref name="destination"/> must be at least
+    /// <see cref="GetMaxEncodedLength"/> characters long.
+    /// </summary>
+    /// <param name="data">The binary data to encode.</param>
+    /// <param name="destination">The buffer receiving the encoded characters.</param>
+    /// <param name="charsWritten">The exact number of encoded characters on success.</param>
+    /// <returns>False when <paramref name="destination"/> is too small.</returns>
+    public static bool TryEncode(ReadOnlySpan<byte> data, Span<char> destination, out int charsWritten)
+    {
+        if (destination.Length < GetMaxEncodedLength(data.Length))
+        {
+            charsWritten = 0;
+            return false;
+        }
+
+        charsWritten = data.IsEmpty ? 0 : Base122Core.Encode(data, destination);
+        return true;
+    }
+
+    /// <summary>
+    /// Encodes binary data into the UTF-8 byte form of a Base122 text —
+    /// the same bytes <see cref="Encode(byte[])"/> would produce as a string,
+    /// but without materializing any string or character data.
+    /// </summary>
+    /// <remarks>
+    /// Inputs up to 64 KB are encoded into an exactly sized array after
+    /// computing the exact encoded length — a single allocation. Larger inputs
+    /// encode into a pooled buffer and are copied to the result.
+    /// </remarks>
+    public static byte[] EncodeToUtf8(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        return EncodeToUtf8(data.AsSpan());
+    }
+
+    /// <summary>
+    /// Encodes binary data into the UTF-8 byte form of a Base122 text —
+    /// the same bytes <see cref="Encode(ReadOnlySpan{byte})"/> would produce as
+    /// a string, but without materializing any string or character data.
+    /// </summary>
+    public static byte[] EncodeToUtf8(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty)
+            return [];
+
+        if (data.Length <= SingleAllocEncodeThreshold)
+        {
+            // Exact length in one pass, then a single right-sized allocation.
+            byte[] result = new byte[GetEncodedToUtf8Length(data)];
+            int written = Base122Core.EncodeToUtf8(data, result);
+            System.Diagnostics.Debug.Assert(written == result.Length, "Base122 length estimate must be exact.");
+            return result;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxEncodedToUtf8Length(data.Length));
+        try
+        {
+            int written = Base122Core.EncodeToUtf8(data, rented);
+            return rented.AsSpan(0, written).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Encodes binary data into a caller-provided buffer holding the UTF-8 byte
+    /// form of the Base122 text.
+    /// <paramref name="destination"/> must be at least
+    /// <see cref="GetMaxEncodedToUtf8Length"/> bytes long.
+    /// </summary>
+    /// <param name="data">The binary data to encode.</param>
+    /// <param name="destination">The buffer receiving the encoded UTF-8 bytes.</param>
+    /// <param name="bytesWritten">The exact number of encoded bytes on success.</param>
+    /// <returns>False when <paramref name="destination"/> is too small.</returns>
+    public static bool TryEncodeToUtf8(ReadOnlySpan<byte> data, Span<byte> destination, out int bytesWritten)
+    {
+        if (destination.Length < GetMaxEncodedToUtf8Length(data.Length))
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        bytesWritten = data.IsEmpty ? 0 : Base122Core.EncodeToUtf8(data, destination);
+        return true;
+    }
+
+    /// <summary>
+    /// Encodes binary data and writes the UTF-8 byte form of the Base122 text
+    /// to <paramref name="destination"/>.
+    /// </summary>
+    /// <param name="data">The binary data to encode.</param>
+    /// <param name="destination">The stream receiving the encoded UTF-8 bytes.</param>
+    /// <returns>The number of encoded bytes written to the stream.</returns>
+    public static int EncodeToUtf8(ReadOnlySpan<byte> data, Stream destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new NotSupportedException("The destination stream must be writable.");
+        if (data.IsEmpty)
+            return 0;
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxEncodedToUtf8Length(data.Length));
+        try
+        {
+            int written = Base122Core.EncodeToUtf8(data, rented);
+            destination.Write(rented, 0, written);
+            return written;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Encodes binary data and writes the UTF-8 byte form of the Base122 text
+    /// to <paramref name="bufferWriter"/>.
+    /// </summary>
+    /// <param name="data">The binary data to encode.</param>
+    /// <param name="bufferWriter">The writer receiving the encoded UTF-8 bytes.</param>
+    /// <returns>The number of encoded bytes written to the writer.</returns>
+    public static int EncodeToUtf8(ReadOnlySpan<byte> data, IBufferWriter<byte> bufferWriter)
+    {
+        ArgumentNullException.ThrowIfNull(bufferWriter);
+        if (data.IsEmpty)
+            return 0;
+
+        Span<byte> span = bufferWriter.GetSpan(GetMaxEncodedToUtf8Length(data.Length));
+        int written = Base122Core.EncodeToUtf8(data, span);
+        bufferWriter.Advance(written);
+        return written;
+    }
+
+    /// <summary>
+    /// Encodes binary data and asynchronously writes the UTF-8 byte form of
+    /// the Base122 text to <paramref name="destination"/>, using the
+    /// encoder's buffered async writes.
+    /// </summary>
+    /// <param name="data">The binary data to encode.</param>
+    /// <param name="destination">The stream receiving the encoded UTF-8 bytes.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    public static async Task EncodeToUtf8Async(ReadOnlyMemory<byte> data, Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new NotSupportedException("The destination stream must be writable.");
+
+        await using var encoder = new Base122Encoder(destination, leaveOpen: true);
+        await encoder.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+        await encoder.CompleteAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Returns the maximum number of bytes encoding
+    /// <paramref name="byteCount"/> bytes to the UTF-8 byte form can ever produce.
+    /// </summary>
+    /// <remarks>
+    /// Every 7-bit group costs at most one byte, except a single shortened
+    /// escape at the end which costs two.
+    /// </remarks>
+    public static int GetMaxEncodedToUtf8Length(int byteCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(byteCount);
+        if (byteCount == 0)
+            return 0;
+        return checked((int)((8L * byteCount + 6) / 7)) + 1;
+    }
+
+    /// <summary>
+    /// Returns the exact number of bytes <see cref="EncodeToUtf8(ReadOnlySpan{byte})"/>
+    /// produces for the given data.
+    /// </summary>
+    public static int GetEncodedToUtf8Length(ReadOnlySpan<byte> data)
+    {
+        int len = data.Length;
+        if (len == 0)
+            return 0;
+
+        int bytes = 0;
+        bool hasPending = false;
+        int i = 0;
+        ulong acc = 0;
+        int accBits = 0;
+
+        while (true)
+        {
+            while (accBits < 7 && i < len)
+            {
+                acc = (acc << 8) | data[i++];
+                accBits += 8;
+            }
+
+            if (accBits >= 7)
+            {
+                accBits -= 7;
+                int group = (int)((acc >> accBits) & 0x7F);
+                acc &= (1UL << accBits) - 1;
+
+                if (hasPending)
+                {
+                    // One escape pair (two bytes) covers the pending group and
+                    // this one.
+                    bytes += 2;
+                    hasPending = false;
+                }
+                else if (Base122Core.Class[group] != 0)
+                {
+                    hasPending = true;
+                    continue;
+                }
+                else
+                {
+                    bytes++;
+                }
+            }
+            else if (accBits > 0)
+            {
+                // Final zero-padded group: a plain character (one byte), or an
+                // escape pair or shortened escape (two bytes).
+                int group = (int)((acc << (7 - accBits)) & 0x7F);
+                if (hasPending || Base122Core.Class[group] != 0)
+                    bytes += 2;
+                else
+                    bytes++;
+                accBits = 0;
+                acc = 0;
+                hasPending = false;
+                break;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // An illegal final group is emitted as a shortened escape (two bytes).
+        if (hasPending)
+            bytes += 2;
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// Returns the exact number of characters <see cref="Encode(ReadOnlySpan{byte})"/>
+    /// produces for the given data.
+    /// </summary>
+    public static int GetEncodedLength(ReadOnlySpan<byte> data)
+    {
+        int len = data.Length;
+        if (len == 0)
+            return 0;
+
+        int chars = 0;
+        bool hasPending = false;
+        int i = 0;
+        ulong acc = 0;
+        int accBits = 0;
+
+        while (true)
+        {
+            while (accBits < 7 && i < len)
+            {
+                acc = (acc << 8) | data[i++];
+                accBits += 8;
+            }
+
+            if (accBits >= 7)
+            {
+                accBits -= 7;
+                int group = (int)((acc >> accBits) & 0x7F);
+                acc &= (1UL << accBits) - 1;
+
+                if (hasPending)
+                {
+                    // One escape character covers the pending group and this one.
+                    hasPending = false;
+                }
+                else if (Base122Core.Class[group] != 0)
+                {
+                    hasPending = true;
+                    continue;
+                }
+
+                chars++;
+            }
+            else if (accBits > 0)
+            {
+                // Final zero-padded group: a plain character or a shortened
+                // escape — one character either way.
+                chars++;
+                accBits = 0;
+                acc = 0;
+                hasPending = false;
+                break;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // An illegal final group is emitted as a shortened escape.
+        if (hasPending)
+            chars++;
+
+        return chars;
+    }
+
+    /// <summary>
+    /// Returns the maximum number of characters encoding
+    /// <paramref name="byteCount"/> bytes can ever produce.
+    /// </summary>
+    public static int GetMaxEncodedLength(int byteCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(byteCount);
+        if (byteCount == 0)
+            return 0;
+        return checked((int)((8L * byteCount + 6) / 7));
+    }
+
+    #endregion
 }

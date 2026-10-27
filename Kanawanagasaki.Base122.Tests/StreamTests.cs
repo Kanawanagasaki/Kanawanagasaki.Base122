@@ -21,7 +21,7 @@ public class Base122EncoderStreamTests
         foreach (int len in new[] { 1, 2, 3, 7, 8, 9, 14, 15, 27, 28, 29, 55, 56, 57, 100, 255, 256, 1000 })
         {
             byte[] data = TestHelpers.RandomBytesArray((ulong)len, len);
-            string expected = Base122.Encode(data);
+            string expected = Base122Encoder.Encode(data);
 
             foreach (int chunkSize in new[] { 1, 2, 3, 5, 7, 8, 13, 64, 4096 })
             {
@@ -51,7 +51,7 @@ public class Base122EncoderStreamTests
             encoder.Complete();
         }
 
-        Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(data)), output.ToArray());
+        Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)), output.ToArray());
     }
 
     [Fact]
@@ -71,7 +71,7 @@ public class Base122EncoderStreamTests
             encoder.Complete();
         }
 
-        Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(data)), output.ToArray());
+        Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)), output.ToArray());
     }
 
     [Fact]
@@ -84,7 +84,7 @@ public class Base122EncoderStreamTests
 
         // Encoder disposed without Complete: output must still be a full valid encoding.
         string decoded = Encoding.UTF8.GetString(output.ToArray());
-        Assert.Equal(data, Base122.Decode(decoded));
+        Assert.Equal(data, Base122Decoder.Decode(decoded));
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public class Base122DecoderStreamTests
         foreach (int len in new[] { 1, 2, 3, 7, 8, 9, 14, 15, 27, 28, 29, 55, 56, 57, 100, 255, 256, 1000 })
         {
             byte[] data = TestHelpers.RandomBytesArray((ulong)len + 12345, len);
-            byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(data));
+            byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(data));
 
             foreach (int bufferSize in new[] { 1, 2, 3, 5, 7, 8, 13, 64, 4096 })
             {
@@ -192,7 +192,7 @@ public class Base122DecoderStreamTests
     public void Read_WithTrickleInputStream_DecodesCorrectly()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xF00D, 2048);
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(data));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(data));
 
         using var decoder = new Base122Decoder(new TrickleStream(new MemoryStream(encoded), 3));
         var decoded = new byte[data.Length];
@@ -209,7 +209,7 @@ public class Base122DecoderStreamTests
     public void Read_WithNonSeekableStream_DecodesCorrectly()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xBEEF, 1000);
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(data));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(data));
 
         using var decoder = new Base122Decoder(new NonSeekableStream(new MemoryStream(encoded)));
         var decoded = new byte[data.Length];
@@ -229,7 +229,7 @@ public class Base122DecoderStreamTests
         // the accumulator repeatedly holds a complete byte between calls; the
         // decoder must emit it before consuming more input.
         byte[] data = new byte[100];
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(data));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(data));
 
         using var decoder = new Base122Decoder(new MemoryStream(encoded));
         var decoded = new byte[data.Length];
@@ -246,7 +246,7 @@ public class Base122DecoderStreamTests
     public void ReadByte_ReturnsBytesThenMinusOne()
     {
         byte[] data = [0x02];
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(data)); // 01 de 80
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)); // 01 de 80
 
         using var decoder = new Base122Decoder(new MemoryStream(encoded));
         Assert.Equal(0x02, decoder.ReadByte());
@@ -256,7 +256,7 @@ public class Base122DecoderStreamTests
     [Fact]
     public void Read_AtEndOfStream_ReturnsZero()
     {
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode("hello world"u8));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode("hello world"u8));
         using var decoder = new Base122Decoder(new MemoryStream(encoded));
 
         var buffer = new byte[64];
@@ -272,7 +272,7 @@ public class Base122DecoderStreamTests
     [Fact]
     public void Read_EmptyBuffer_ReturnsZero()
     {
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode("hello"u8));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode("hello"u8));
         using var decoder = new Base122Decoder(new MemoryStream(encoded));
         Assert.Equal(0, decoder.Read(Array.Empty<byte>()));
         Assert.Equal(0, decoder.Read(new byte[10], 5, 0));
@@ -283,7 +283,7 @@ public class Base122DecoderStreamTests
     {
         // The encoding of 100 zero bytes ends with a shortened escape whose
         // UTF-8 form is DE 80; removing the final byte truncates the escape.
-        byte[] encoded = Encoding.UTF8.GetBytes(Base122.Encode(new byte[100]));
+        byte[] encoded = Encoding.UTF8.GetBytes(Base122Encoder.Encode(new byte[100]));
         Assert.Equal(0x80, encoded[^1]);
 
         using var decoder = new Base122Decoder(new MemoryStream(encoded[..^1]));
@@ -386,7 +386,7 @@ public class StreamPipelineTests
             encoder.Complete();
         }
 
-        Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(data)), pipe.ToArray());
+        Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)), pipe.ToArray());
 
         pipe.Position = 0;
         using var decoder = new Base122Decoder(pipe, leaveOpen: true);

@@ -5,8 +5,8 @@ using Xunit;
 namespace Kanawanagasaki.Base122.Tests;
 
 /// <summary>
-/// Cross-validation of the UTF-8 byte-form APIs (<see cref="Base122.EncodeToUtf8"/>,
-/// <see cref="Base122.DecodeFromUtf8"/>) against the reference Rust implementation
+/// Cross-validation of the UTF-8 byte-form APIs (<see cref="Base122Encoder.EncodeToUtf8"/>,
+/// <see cref="Base122Decoder.DecodeFromUtf8"/>) against the reference Rust implementation
 /// and the char-based APIs.
 /// </summary>
 public class Utf8VectorTests
@@ -21,8 +21,8 @@ public class Utf8VectorTests
         byte[] data = TestHelpers.FromHex(dataHex);
         byte[] expected = TestHelpers.FromHex(encodedHex);
 
-        Assert.Equal(expected, Base122.EncodeToUtf8(data));
-        Assert.Equal(expected, Base122.EncodeToUtf8(data.AsSpan()));
+        Assert.Equal(expected, Base122Encoder.EncodeToUtf8(data));
+        Assert.Equal(expected, Base122Encoder.EncodeToUtf8(data.AsSpan()));
     }
 
     [Theory]
@@ -32,8 +32,8 @@ public class Utf8VectorTests
         byte[] expected = TestHelpers.FromHex(dataHex);
         byte[] encoded = TestHelpers.FromHex(encodedHex);
 
-        Assert.Equal(expected, Base122.DecodeFromUtf8(encoded));
-        Assert.Equal(expected, Base122.DecodeFromUtf8(encoded.AsSpan()));
+        Assert.Equal(expected, Base122Decoder.DecodeFromUtf8(encoded));
+        Assert.Equal(expected, Base122Decoder.DecodeFromUtf8(encoded.AsSpan()));
     }
 
     [Theory]
@@ -42,9 +42,9 @@ public class Utf8VectorTests
     {
         byte[] data = TestHelpers.FromHex(dataHex);
         byte[] expected = TestHelpers.FromHex(encodedHex);
-        byte[] buffer = new byte[Base122.GetMaxEncodedToUtf8Length(data.Length)];
+        byte[] buffer = new byte[Base122Encoder.GetMaxEncodedToUtf8Length(data.Length)];
 
-        Assert.True(Base122.TryEncodeToUtf8(data, buffer, out int written));
+        Assert.True(Base122Encoder.TryEncodeToUtf8(data, buffer, out int written));
         Assert.Equal(expected.Length, written);
         Assert.Equal(expected, buffer[..written].ToArray());
     }
@@ -55,9 +55,9 @@ public class Utf8VectorTests
     {
         byte[] expected = TestHelpers.FromHex(dataHex);
         byte[] encoded = TestHelpers.FromHex(encodedHex);
-        byte[] buffer = new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length)];
+        byte[] buffer = new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length)];
 
-        Assert.True(Base122.TryDecodeFromUtf8(encoded, buffer, out int written));
+        Assert.True(Base122Decoder.TryDecodeFromUtf8(encoded, buffer, out int written));
         Assert.Equal(expected.Length, written);
         Assert.Equal(expected, buffer[..written].ToArray());
     }
@@ -68,7 +68,7 @@ public class Utf8VectorTests
     {
         byte[] data = TestHelpers.FromHex(dataHex);
 
-        Assert.Equal(encodedHex.Length / 2, Base122.GetEncodedToUtf8Length(data));
+        Assert.Equal(encodedHex.Length / 2, Base122Encoder.GetEncodedToUtf8Length(data));
     }
 
     [Theory]
@@ -77,7 +77,7 @@ public class Utf8VectorTests
     {
         byte[] encoded = TestHelpers.FromHex(encodedHex);
 
-        Assert.Equal(dataHex.Length / 2, Base122.GetDecodedFromUtf8Length(encoded));
+        Assert.Equal(dataHex.Length / 2, Base122Decoder.GetDecodedFromUtf8Length(encoded));
     }
 
     [Theory]
@@ -87,14 +87,14 @@ public class Utf8VectorTests
         byte[] data = TestHelpers.FromHex(dataHex);
         byte[] encoded = TestHelpers.FromHex(encodedHex);
 
-        Assert.Equal(encoded, Encoding.UTF8.GetBytes(Base122.Encode(data)));
-        Assert.Equal(Base122.Decode(Encoding.UTF8.GetString(encoded)), Base122.DecodeFromUtf8(encoded));
+        Assert.Equal(encoded, Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)));
+        Assert.Equal(Base122Decoder.Decode(Encoding.UTF8.GetString(encoded)), Base122Decoder.DecodeFromUtf8(encoded));
     }
 
     [Fact]
     public void EncodeToUtf8_HelloWorld_MatchesReference()
     {
-        Assert.Equal("34192d46633c407737d78d4620", TestHelpers.ToHex(Base122.EncodeToUtf8("hello world"u8)));
+        Assert.Equal("34192d46633c407737d78d4620", TestHelpers.ToHex(Base122Encoder.EncodeToUtf8("hello world"u8)));
     }
 }
 
@@ -107,12 +107,12 @@ public class Utf8RoundTripTests
         for (int b = 0; b <= 255; b++)
         {
             byte[] data = [(byte)b];
-            byte[] encoded = Base122.EncodeToUtf8(data);
+            byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
-            Assert.Equal(Base122.GetEncodedToUtf8Length(data), encoded.Length);
-            Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(data)), encoded);
-            Assert.Equal(data, Base122.DecodeFromUtf8(encoded));
-            Assert.Equal(data.Length, Base122.GetDecodedFromUtf8Length(encoded));
+            Assert.Equal(Base122Encoder.GetEncodedToUtf8Length(data), encoded.Length);
+            Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)), encoded);
+            Assert.Equal(data, Base122Decoder.DecodeFromUtf8(encoded));
+            Assert.Equal(data.Length, Base122Decoder.GetDecodedFromUtf8Length(encoded));
         }
     }
 
@@ -123,22 +123,22 @@ public class Utf8RoundTripTests
         // first and second of an escape pair, final zero-padded group, and
         // pending-final (shortened escape).
         byte[] pair = new byte[2];
-        Span<byte> buffer = new byte[Base122.GetMaxEncodedToUtf8Length(2)];
+        Span<byte> buffer = new byte[Base122Encoder.GetMaxEncodedToUtf8Length(2)];
 
         for (int v = 0; v <= 0xFFFF; v++)
         {
             pair[0] = (byte)(v >> 8);
             pair[1] = (byte)v;
 
-            byte[] encoded = Base122.EncodeToUtf8(pair);
-            Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(pair)), encoded);
-            Assert.Equal(pair, Base122.DecodeFromUtf8(encoded));
+            byte[] encoded = Base122Encoder.EncodeToUtf8(pair);
+            Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(pair)), encoded);
+            Assert.Equal(pair, Base122Decoder.DecodeFromUtf8(encoded));
 
-            Assert.True(Base122.TryEncodeToUtf8(pair, buffer, out int written));
+            Assert.True(Base122Encoder.TryEncodeToUtf8(pair, buffer, out int written));
             Assert.Equal(encoded.Length, written);
 
-            Assert.Equal(pair, Base122.DecodeFromUtf8(encoded));
-            Assert.Equal(pair.Length, Base122.GetDecodedFromUtf8Length(encoded));
+            Assert.Equal(pair, Base122Decoder.DecodeFromUtf8(encoded));
+            Assert.Equal(pair.Length, Base122Decoder.GetDecodedFromUtf8Length(encoded));
         }
     }
 
@@ -150,12 +150,12 @@ public class Utf8RoundTripTests
             for (int len = 0; len <= 512; len++)
             {
                 byte[] data = TestHelpers.RandomBytesArray(seed + (ulong)len, len);
-                byte[] encoded = Base122.EncodeToUtf8(data);
+                byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
-                Assert.Equal(Base122.GetEncodedToUtf8Length(data), encoded.Length);
-                Assert.True(encoded.Length <= Base122.GetMaxEncodedToUtf8Length(len));
-                Assert.Equal(data, Base122.DecodeFromUtf8(encoded));
-                Assert.Equal(data.Length, Base122.GetDecodedFromUtf8Length(encoded));
+                Assert.Equal(Base122Encoder.GetEncodedToUtf8Length(data), encoded.Length);
+                Assert.True(encoded.Length <= Base122Encoder.GetMaxEncodedToUtf8Length(len));
+                Assert.Equal(data, Base122Decoder.DecodeFromUtf8(encoded));
+                Assert.Equal(data.Length, Base122Decoder.GetDecodedFromUtf8Length(encoded));
             }
         }
     }
@@ -169,10 +169,10 @@ public class Utf8RoundTripTests
             for (int len = 1; len <= 256; len += 7)
             {
                 byte[] data = Enumerable.Repeat(fill, len).ToArray();
-                byte[] encoded = Base122.EncodeToUtf8(data);
+                byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
-                Assert.Equal(Base122.GetEncodedToUtf8Length(data), encoded.Length);
-                Assert.Equal(data, Base122.DecodeFromUtf8(encoded));
+                Assert.Equal(Base122Encoder.GetEncodedToUtf8Length(data), encoded.Length);
+                Assert.Equal(data, Base122Decoder.DecodeFromUtf8(encoded));
             }
         }
     }
@@ -184,8 +184,8 @@ public class Utf8RoundTripTests
         {
             byte[] data = TestHelpers.RandomBytesArray(0x7AB1E5UL, len);
 
-            Assert.Equal(Encoding.UTF8.GetBytes(Base122.Encode(data)), Base122.EncodeToUtf8(data));
-            Assert.Equal(data, Base122.DecodeFromUtf8(Base122.EncodeToUtf8(data)));
+            Assert.Equal(Encoding.UTF8.GetBytes(Base122Encoder.Encode(data)), Base122Encoder.EncodeToUtf8(data));
+            Assert.Equal(data, Base122Decoder.DecodeFromUtf8(Base122Encoder.EncodeToUtf8(data)));
         }
     }
 
@@ -198,7 +198,7 @@ public class Utf8RoundTripTests
         using (var encoder = new Base122Encoder(output, leaveOpen: true))
             encoder.Write(data);
 
-        Assert.Equal(Base122.EncodeToUtf8(data), output.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), output.ToArray());
     }
 }
 
@@ -215,9 +215,9 @@ public class Utf8ErrorTests
     public void TryDecodeFromUtf8_InvalidInput_ReturnsFalse(string hex)
     {
         byte[] encoded = TestHelpers.FromHex(hex);
-        byte[] buffer = new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length)];
+        byte[] buffer = new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length)];
 
-        Assert.False(Base122.TryDecodeFromUtf8(encoded, buffer, out int written));
+        Assert.False(Base122Decoder.TryDecodeFromUtf8(encoded, buffer, out int written));
         Assert.Equal(0, written);
     }
 
@@ -230,19 +230,19 @@ public class Utf8ErrorTests
     [InlineData("41C241")]
     public void DecodeFromUtf8_InvalidInput_ThrowsFormatException(string hex)
     {
-        Assert.Throws<FormatException>(() => Base122.DecodeFromUtf8(TestHelpers.FromHex(hex)));
+        Assert.Throws<FormatException>(() => Base122Decoder.DecodeFromUtf8(TestHelpers.FromHex(hex)));
     }
 
     [Fact]
     public void DecodeFromUtf8_TruncatedEscapeAtEnd_ThrowsFormatException()
     {
-        Assert.Throws<FormatException>(() => Base122.DecodeFromUtf8([0x41, 0xC2]));
+        Assert.Throws<FormatException>(() => Base122Decoder.DecodeFromUtf8([0x41, 0xC2]));
     }
 
     [Fact]
     public void TryDecodeFromUtf8_TruncatedEscapeAtEnd_ReturnsFalse()
     {
-        Assert.False(Base122.TryDecodeFromUtf8([0x41, 0xC2], new byte[8], out int written));
+        Assert.False(Base122Decoder.TryDecodeFromUtf8([0x41, 0xC2], new byte[8], out int written));
         Assert.Equal(0, written);
     }
 
@@ -250,9 +250,9 @@ public class Utf8ErrorTests
     public void TryDecodeFromUtf8_DestinationTooSmall_ReturnsFalse()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x5EA1UL, 100);
-        byte[] encoded = Base122.EncodeToUtf8(data);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
-        Assert.False(Base122.TryDecodeFromUtf8(encoded, new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length) - 1], out int written));
+        Assert.False(Base122Decoder.TryDecodeFromUtf8(encoded, new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length) - 1], out int written));
         Assert.Equal(0, written);
     }
 
@@ -260,19 +260,19 @@ public class Utf8ErrorTests
     public void TryEncodeToUtf8_DestinationSmallerThanMax_ReturnsFalse()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x5EA1UL, 100);
-        int exact = Base122.GetEncodedToUtf8Length(data);
-        int max = Base122.GetMaxEncodedToUtf8Length(data.Length);
+        int exact = Base122Encoder.GetEncodedToUtf8Length(data);
+        int max = Base122Encoder.GetMaxEncodedToUtf8Length(data.Length);
 
         // The Try API requires the conservative maximum; an exact-size buffer
         // (smaller than max whenever an escape pair or shortened escape adds a
         // byte) is reported as too small rather than risking a partial encode.
         if (exact < max)
         {
-            Assert.False(Base122.TryEncodeToUtf8(data, new byte[exact], out int written));
+            Assert.False(Base122Encoder.TryEncodeToUtf8(data, new byte[exact], out int written));
             Assert.Equal(0, written);
         }
 
-        Assert.True(Base122.TryEncodeToUtf8(data, new byte[max], out int maxWritten));
+        Assert.True(Base122Encoder.TryEncodeToUtf8(data, new byte[max], out int maxWritten));
         Assert.Equal(exact, maxWritten);
     }
 
@@ -284,17 +284,17 @@ public class Utf8ErrorTests
         // bits. The O(1) length formula overestimates by one; the decoder trims.
         byte[] encoded = [0xDE, 0x80, 0x41];
 
-        Assert.Equal(2, Base122.GetDecodedFromUtf8Length(encoded));
-        Assert.Equal(new byte[] { 0x01 }, Base122.DecodeFromUtf8(encoded));
+        Assert.Equal(2, Base122Decoder.GetDecodedFromUtf8Length(encoded));
+        Assert.Equal(new byte[] { 0x01 }, Base122Decoder.DecodeFromUtf8(encoded));
     }
 
     [Fact]
     public void TryDecodeFromUtf8_NonCanonicalMidStreamShortened_Succeeds()
     {
         byte[] encoded = [0xDE, 0x80, 0x41];
-        byte[] buffer = new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length)];
+        byte[] buffer = new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length)];
 
-        Assert.True(Base122.TryDecodeFromUtf8(encoded, buffer, out int written));
+        Assert.True(Base122Decoder.TryDecodeFromUtf8(encoded, buffer, out int written));
         Assert.Equal(1, written);
         Assert.Equal(new byte[] { 0x01 }, buffer[..written].ToArray());
     }
@@ -307,14 +307,14 @@ public class Utf8ErrorTests
             for (int len = 0; len <= 96; len++)
             {
                 byte[] encoded = TestHelpers.RandomBytesArray(seed + (ulong)len, len);
-                byte[] buffer = new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length) + 8];
+                byte[] buffer = new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length) + 8];
 
-                bool tried = Base122.TryDecodeFromUtf8(encoded, buffer, out int written);
+                bool tried = Base122Decoder.TryDecodeFromUtf8(encoded, buffer, out int written);
 
                 byte[] decoded;
                 try
                 {
-                    decoded = Base122.DecodeFromUtf8(encoded);
+                    decoded = Base122Decoder.DecodeFromUtf8(encoded);
                 }
                 catch (FormatException)
                 {
@@ -329,7 +329,7 @@ public class Utf8ErrorTests
 
                 Assert.True(tried);
                 Assert.Equal(decoded, buffer[..written].ToArray());
-                Assert.True(decoded.Length <= Base122.GetMaxDecodedFromUtf8Length(len));
+                Assert.True(decoded.Length <= Base122Decoder.GetMaxDecodedFromUtf8Length(len));
             }
         }
     }
@@ -341,17 +341,17 @@ public class Utf8LengthTests
     [Fact]
     public void ZeroLength_ReturnsZero()
     {
-        Assert.Equal(0, Base122.GetMaxEncodedToUtf8Length(0));
-        Assert.Equal(0, Base122.GetMaxDecodedFromUtf8Length(0));
-        Assert.Equal(0, Base122.GetEncodedToUtf8Length(ReadOnlySpan<byte>.Empty));
-        Assert.Equal(0, Base122.GetDecodedFromUtf8Length(ReadOnlySpan<byte>.Empty));
+        Assert.Equal(0, Base122Encoder.GetMaxEncodedToUtf8Length(0));
+        Assert.Equal(0, Base122Decoder.GetMaxDecodedFromUtf8Length(0));
+        Assert.Equal(0, Base122Encoder.GetEncodedToUtf8Length(ReadOnlySpan<byte>.Empty));
+        Assert.Equal(0, Base122Decoder.GetDecodedFromUtf8Length(ReadOnlySpan<byte>.Empty));
     }
 
     [Fact]
     public void NegativeCounts_Throw()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => Base122.GetMaxEncodedToUtf8Length(-1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Base122.GetMaxDecodedFromUtf8Length(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Base122Encoder.GetMaxEncodedToUtf8Length(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Base122Decoder.GetMaxDecodedFromUtf8Length(-1));
     }
 
     [Fact]
@@ -363,9 +363,9 @@ public class Utf8LengthTests
             pair[0] = (byte)(v >> 8);
             pair[1] = (byte)v;
 
-            int encoded = Base122.EncodeToUtf8(pair).Length;
-            Assert.True(encoded <= Base122.GetMaxEncodedToUtf8Length(2));
-            Assert.True(encoded >= Base122.GetEncodedToUtf8Length(pair));
+            int encoded = Base122Encoder.EncodeToUtf8(pair).Length;
+            Assert.True(encoded <= Base122Encoder.GetMaxEncodedToUtf8Length(2));
+            Assert.True(encoded >= Base122Encoder.GetEncodedToUtf8Length(pair));
         }
     }
 
@@ -375,10 +375,10 @@ public class Utf8LengthTests
         for (int len = 1; len <= 300; len++)
         {
             byte[] data = TestHelpers.RandomBytesArray(0xB0_0000UL + (ulong)len, len);
-            int encoded = Base122.EncodeToUtf8(data).Length;
+            int encoded = Base122Encoder.EncodeToUtf8(data).Length;
 
-            Assert.True(encoded <= Base122.GetMaxEncodedToUtf8Length(len));
-            Assert.Equal(encoded, Base122.GetEncodedToUtf8Length(data));
+            Assert.True(encoded <= Base122Encoder.GetMaxEncodedToUtf8Length(len));
+            Assert.Equal(encoded, Base122Encoder.GetEncodedToUtf8Length(data));
         }
     }
 }
@@ -389,33 +389,33 @@ public class Utf8EmptyInputTests
     [Fact]
     public void EncodeToUtf8_Empty_ReturnsEmpty()
     {
-        Assert.Empty(Base122.EncodeToUtf8(Array.Empty<byte>()));
-        Assert.Empty(Base122.EncodeToUtf8(ReadOnlySpan<byte>.Empty));
-        Assert.Empty(Base122.EncodeToUtf8(new byte[0]));
+        Assert.Empty(Base122Encoder.EncodeToUtf8(Array.Empty<byte>()));
+        Assert.Empty(Base122Encoder.EncodeToUtf8(ReadOnlySpan<byte>.Empty));
+        Assert.Empty(Base122Encoder.EncodeToUtf8(new byte[0]));
     }
 
     [Fact]
     public void DecodeFromUtf8_Empty_ReturnsEmpty()
     {
-        Assert.Empty(Base122.DecodeFromUtf8(Array.Empty<byte>()));
-        Assert.Empty(Base122.DecodeFromUtf8(ReadOnlySpan<byte>.Empty));
+        Assert.Empty(Base122Decoder.DecodeFromUtf8(Array.Empty<byte>()));
+        Assert.Empty(Base122Decoder.DecodeFromUtf8(ReadOnlySpan<byte>.Empty));
     }
 
     [Fact]
     public void Try_EmptyData_SucceedsWithZeroWritten()
     {
-        Assert.True(Base122.TryEncodeToUtf8(ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out int encoded));
+        Assert.True(Base122Encoder.TryEncodeToUtf8(ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out int encoded));
         Assert.Equal(0, encoded);
 
-        Assert.True(Base122.TryDecodeFromUtf8(ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out int decoded));
+        Assert.True(Base122Decoder.TryDecodeFromUtf8(ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out int decoded));
         Assert.Equal(0, decoded);
     }
 
     [Fact]
     public void NullArray_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => Base122.EncodeToUtf8((byte[])null!));
-        Assert.Throws<ArgumentNullException>(() => Base122.DecodeFromUtf8((byte[])null!));
+        Assert.Throws<ArgumentNullException>(() => Base122Encoder.EncodeToUtf8((byte[])null!));
+        Assert.Throws<ArgumentNullException>(() => Base122Decoder.DecodeFromUtf8((byte[])null!));
     }
 }
 
@@ -440,9 +440,9 @@ public class Utf8AllocationTests
     public void EncodeToUtf8_Small_AllocatesOnlyTheResult()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xA11CE, 10_000);
-        byte[] expected = Base122.EncodeToUtf8(data);
+        byte[] expected = Base122Encoder.EncodeToUtf8(data);
 
-        long allocated = AllocatedBytes(() => Base122.EncodeToUtf8(data));
+        long allocated = AllocatedBytes(() => Base122Encoder.EncodeToUtf8(data));
         // Exactly one byte[] allocation (payload + object header) plus slack.
         Assert.InRange(allocated, expected.Length, expected.Length + 64);
     }
@@ -450,10 +450,10 @@ public class Utf8AllocationTests
     [Fact]
     public void DecodeFromUtf8_Canonical_AllocatesOnlyTheResult()
     {
-        byte[] encoded = Base122.EncodeToUtf8(TestHelpers.RandomBytesArray(0xB0B, 10_000));
-        byte[] expected = Base122.DecodeFromUtf8(encoded);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(TestHelpers.RandomBytesArray(0xB0B, 10_000));
+        byte[] expected = Base122Decoder.DecodeFromUtf8(encoded);
 
-        long allocated = AllocatedBytes(() => Base122.DecodeFromUtf8(encoded));
+        long allocated = AllocatedBytes(() => Base122Decoder.DecodeFromUtf8(encoded));
         Assert.InRange(allocated, expected.Length, expected.Length + 64);
     }
 
@@ -461,14 +461,14 @@ public class Utf8AllocationTests
     public void TryEncodeAndTryDecodeToUtf8_AllocateNothing()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xD1CE, 10_000);
-        byte[] encoded = Base122.EncodeToUtf8(data);
-        byte[] encodedBuffer = new byte[Base122.GetMaxEncodedToUtf8Length(data.Length)];
-        byte[] decodedBuffer = new byte[Base122.GetMaxDecodedFromUtf8Length(encoded.Length)];
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
+        byte[] encodedBuffer = new byte[Base122Encoder.GetMaxEncodedToUtf8Length(data.Length)];
+        byte[] decodedBuffer = new byte[Base122Decoder.GetMaxDecodedFromUtf8Length(encoded.Length)];
 
         long allocated = AllocatedBytes(() =>
         {
-            Base122.TryEncodeToUtf8(data, encodedBuffer, out int bytesWritten);
-            Base122.TryDecodeFromUtf8(encoded, decodedBuffer, out _);
+            Base122Encoder.TryEncodeToUtf8(data, encodedBuffer, out int bytesWritten);
+            Base122Decoder.TryDecodeFromUtf8(encoded, decodedBuffer, out _);
         });
 
         Assert.Equal(0, allocated);
@@ -479,7 +479,7 @@ public class Utf8AllocationTests
     {
         byte[] data = TestHelpers.RandomBytesArray(0xB0B, 100_000);
 
-        long allocated = AllocatedBytes(() => Base122.EncodeToUtf8(data));
+        long allocated = AllocatedBytes(() => Base122Encoder.EncodeToUtf8(data));
         // Result (~114 KB) plus one pooled rent; no intermediate copies.
         Assert.InRange(allocated, 0, 300_000);
     }

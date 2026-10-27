@@ -25,7 +25,7 @@ public class DecodeRobustnessTests
             {
                 var chars = PseudoRandomChars(0xD1B5_4A32 + (ulong)len * 1000 + (ulong)trial, len).ToArray();
                 // Any result is acceptable; a throw fails the test.
-                Base122.TryDecode(chars, buffer, out _);
+                Base122Decoder.TryDecode(chars, buffer, out _);
             }
         }
     }
@@ -40,16 +40,16 @@ public class DecodeRobustnessTests
             {
                 ulong seed = (ulong)len * 7919 + (ulong)trial;
                 byte[] data = TestHelpers.RandomBytesArray(seed, len);
-                var chars = Base122.Encode(data).ToArray();
+                var chars = Base122Encoder.Encode(data).ToArray();
 
                 // Corrupt a character to a random value in the Base122 char space.
                 int pos = (int)(TestHelpers.NextU64(ref seed) % (ulong)chars.Length);
                 chars[pos] = (char)(TestHelpers.NextU64(ref seed) & 0x7FF);
-                Base122.TryDecode(chars, buffer, out _);
+                Base122Decoder.TryDecode(chars, buffer, out _);
 
                 // Truncate the corrupted encoding.
                 int cut = (int)(TestHelpers.NextU64(ref seed) % (ulong)(chars.Length + 1));
-                Base122.TryDecode(chars.AsSpan(0, cut), buffer, out _);
+                Base122Decoder.TryDecode(chars.AsSpan(0, cut), buffer, out _);
             }
         }
     }
@@ -64,7 +64,7 @@ public class DecodeRobustnessTests
                 var chars = PseudoRandomChars(0xABCD_1234 + (ulong)len * 31 + (ulong)trial, len).ToArray();
                 try
                 {
-                    _ = Base122.Decode(chars);
+                    _ = Base122Decoder.Decode(chars);
                 }
                 catch (FormatException)
                 {
@@ -82,7 +82,7 @@ public class DecodeRobustnessTests
             for (int trial = 0; trial < 25; trial++)
             {
                 byte[] data = TestHelpers.RandomBytesArray((ulong)len * 131 + (ulong)trial, len);
-                string encoded = Base122.Encode(data);
+                string encoded = Base122Encoder.Encode(data);
 
                 foreach (char c in encoded)
                 {
@@ -91,7 +91,7 @@ public class DecodeRobustnessTests
                     Assert.True(legal || escape, $"illegal character U+{c:X4} in output");
                 }
 
-                Assert.Equal(data, Base122.Decode(encoded));
+                Assert.Equal(data, Base122Decoder.Decode(encoded));
             }
         }
     }

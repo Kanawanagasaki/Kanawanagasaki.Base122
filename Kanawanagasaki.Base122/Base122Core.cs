@@ -219,7 +219,7 @@ internal static class Base122Core
 
     /// <summary>
     /// Encodes <paramref name="data"/> into <paramref name="destination"/>, which
-    /// must be at least <see cref="Base122.GetEncodedLength"/> characters long.
+    /// must be at least <see cref="Base122Encoder.GetEncodedLength"/> characters long.
     /// Returns the number of characters written.
     /// </summary>
     public static int Encode(ReadOnlySpan<byte> data, Span<char> destination)
@@ -334,7 +334,7 @@ internal static class Base122Core
 
     /// <summary>
     /// Decodes <paramref name="encoded"/> into <paramref name="destination"/>,
-    /// which must be at least <see cref="Base122.GetMaxDecodedLength"/>
+    /// which must be at least <see cref="Base122Decoder.GetMaxDecodedLength"/>
     /// characters long. Returns false and reports the offending position when
     /// the input contains characters that cannot occur in Base122 text.
     /// </summary>
@@ -405,7 +405,7 @@ internal static class Base122Core
     /// <summary>
     /// Encodes <paramref name="data"/> into the UTF-8 byte form of the Base122
     /// text. <paramref name="destination"/> must be at least
-    /// <see cref="Base122.GetMaxEncodedToUtf8Length"/> bytes long. Returns the
+    /// <see cref="Base122Encoder.GetMaxEncodedToUtf8Length"/> bytes long. Returns the
     /// number of bytes written.
     /// </summary>
     public static int EncodeToUtf8(ReadOnlySpan<byte> data, Span<byte> destination)
@@ -527,7 +527,7 @@ internal static class Base122Core
     /// </summary>
     /// <remarks>
     /// <paramref name="destination"/> must be able to hold the decoded output:
-    /// at most <see cref="Base122.GetMaxDecodedFromUtf8Length"/> bytes, since
+    /// at most <see cref="Base122Decoder.GetMaxDecodedFromUtf8Length"/> bytes, since
     /// every input byte carries exactly 7 bits.
     /// </remarks>
     public static bool DecodeFromUtf8(ReadOnlySpan<byte> encoded, Span<byte> destination, out int bytesWritten, out int errorOffset)

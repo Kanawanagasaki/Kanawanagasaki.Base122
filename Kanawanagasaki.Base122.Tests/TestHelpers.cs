@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Text;
 
@@ -49,6 +50,52 @@ public static class TestHelpers
 
     /// <summary>The six ASCII values that Base122 must never emit literally.</summary>
     public static readonly byte[] IllegalBytes = [0, 10, 13, 34, 38, 92];
+}
+
+/// <summary>A minimal growable <see cref="IBufferWriter{Byte}"/> for tests.</summary>
+public sealed class TestBufferWriter : IBufferWriter<byte>
+{
+    private byte[] _buffer = [];
+
+    /// <summary>Total number of bytes advanced.</summary>
+    public int Written { get; private set; }
+
+    /// <summary>Number of times <see cref="GetSpan(int)"/> was called.</summary>
+    public int GetSpanCalls { get; private set; }
+
+    public Span<byte> GetSpan(int sizeHint)
+    {
+        GetSpanCalls++;
+        ArgumentOutOfRangeException.ThrowIfNegative(sizeHint);
+
+        if (_buffer.Length - Written < sizeHint)
+        {
+            int newSize = Math.Max(Written + sizeHint, Math.Max(_buffer.Length * 2, 16));
+            Array.Resize(ref _buffer, newSize);
+        }
+        return _buffer.AsSpan(Written);
+    }
+
+    public Memory<byte> GetMemory(int sizeHint)
+    {
+        GetSpan(sizeHint);
+        return _buffer.AsMemory(Written);
+    }
+
+    public void Advance(int count)
+    {
+        if (count < 0 || Written + count > _buffer.Length)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        Written += count;
+    }
+
+    public void Clear()
+    {
+        Written = 0;
+        GetSpanCalls = 0;
+    }
+
+    public byte[] ToArray() => _buffer[..Written].ToArray();
 }
 
 /// <summary>A read-only stream wrapper that hides seeking, to exercise buffered decoding.</summary>

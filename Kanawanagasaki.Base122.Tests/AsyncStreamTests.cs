@@ -13,7 +13,7 @@ public sealed class YieldAsyncStream(Stream inner) : Stream
 {
     public override bool CanRead => true;
     public override bool CanSeek => false;
-    public override bool CanWrite => false;
+    public override bool CanWrite => inner.CanWrite;
     public override long Length => inner.Length;
     public override long Position { get => inner.Position; set => inner.Position = value; }
 
@@ -25,10 +25,17 @@ public sealed class YieldAsyncStream(Stream inner) : Stream
         return await inner.ReadAsync(buffer, cancellationToken);
     }
 
+    public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        await Task.Yield();
+        await inner.WriteAsync(buffer, cancellationToken);
+    }
+
     public override void Flush() { }
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
     public override void SetLength(long value) => throw new NotSupportedException();
-    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 /// <summary>The <see cref="Stream"/> contract of the encoder and decoder.</summary>
@@ -84,7 +91,7 @@ public class StreamContractTests
         ((Base122Encoder)encoder).Complete();
         encoder.Dispose();
 
-        byte[] expected = Base122.EncodeToUtf8(data.Append((byte)0xAB).ToArray());
+        byte[] expected = Base122Encoder.EncodeToUtf8(data.Append((byte)0xAB).ToArray());
         Assert.Equal(expected, output.ToArray());
     }
 
@@ -92,7 +99,7 @@ public class StreamContractTests
     public void Decoder_ReadsThroughStreamReader()
     {
         byte[] text = "The quick brown fox jumps over the lazy dog."u8.ToArray();
-        byte[] encoded = Base122.EncodeToUtf8(text);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(text);
 
         using var decoder = new Base122Decoder(new MemoryStream(encoded));
         using var reader = new StreamReader(decoder);
@@ -117,14 +124,14 @@ public class SyncPipeTests
             encoder.Complete();
         }
 
-        Assert.Equal(Base122.EncodeToUtf8(data), output.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), output.ToArray());
     }
 
     [Fact]
     public void Decoder_CopyTo_Destination_ProducesDecodedData()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x91DE, 50_000);
-        byte[] encoded = Base122.EncodeToUtf8(data);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
         using var input = new MemoryStream(encoded);
         using var decoder = new Base122Decoder(input, leaveOpen: true);
@@ -147,7 +154,7 @@ public class SyncPipeTests
             encoder.Complete();
         }
 
-        Assert.Equal(Base122.EncodeToUtf8(data), encodedStream.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), encodedStream.ToArray());
 
         encodedStream.Position = 0;
         using var decodedStream = new MemoryStream();
@@ -178,7 +185,7 @@ public class AsyncStreamTests
             await encoder.CompleteAsync();
         }
 
-        Assert.Equal(Base122.EncodeToUtf8(data), output.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), output.ToArray());
     }
 
     [Theory]
@@ -186,7 +193,7 @@ public class AsyncStreamTests
     public async Task ReadAsync_Chunked_MatchesData(int chunkSize)
     {
         byte[] data = TestHelpers.RandomBytesArray(0x5A5A, 3000);
-        byte[] encoded = Base122.EncodeToUtf8(data);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
         await using var decoder = new Base122Decoder(new MemoryStream(encoded), leaveOpen: true);
         var decoded = new byte[data.Length];
@@ -204,7 +211,7 @@ public class AsyncStreamTests
     public async Task ReadAsync_OverYieldingStream_ForcesRealAwaits()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xE11A, 20_000);
-        byte[] encoded = Base122.EncodeToUtf8(data);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(data);
 
         await using var decoder = new Base122Decoder(new YieldAsyncStream(new MemoryStream(encoded)));
         var decoded = new byte[data.Length];
@@ -229,7 +236,7 @@ public class AsyncStreamTests
             await raw.CopyToAsync(encoder);
             await encoder.CompleteAsync();
         }
-        Assert.Equal(Base122.EncodeToUtf8(data), encodedStream.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), encodedStream.ToArray());
 
         // Decode: decoder -> destination.
         encodedStream.Position = 0;
@@ -255,7 +262,7 @@ public class AsyncStreamTests
             await encoder.CompleteAsync();
         }
 
-        Assert.Equal(Base122.EncodeToUtf8(data), output.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), output.ToArray());
     }
 
     [Fact]
@@ -294,7 +301,7 @@ public class AsyncStreamTests
 
         // Encoder disposed without CompleteAsync: output must still be a full
         // valid encoding, and the inner stream must be disposed.
-        Assert.Equal(Base122.EncodeToUtf8(data), output.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), output.ToArray());
         Assert.False(output.CanRead);
     }
 
@@ -340,7 +347,7 @@ public class AsyncStreamTests
     [Fact]
     public async Task ReadAsync_TruncatedEscape_ThrowsInvalidData()
     {
-        byte[] encoded = Base122.EncodeToUtf8(new byte[100]);
+        byte[] encoded = Base122Encoder.EncodeToUtf8(new byte[100]);
         await using var decoder = new Base122Decoder(new MemoryStream(encoded[..^1]));
         await Assert.ThrowsAsync<InvalidDataException>(() => decoder.ReadAsync(new byte[128]).AsTask());
     }
@@ -358,7 +365,7 @@ public class AsyncStreamTests
             await encoder.CompleteAsync();
         }
 
-        Assert.Equal(Base122.EncodeToUtf8(data), encodedStream.ToArray());
+        Assert.Equal(Base122Encoder.EncodeToUtf8(data), encodedStream.ToArray());
 
         encodedStream.Position = 0;
         using var destination = new MemoryStream();

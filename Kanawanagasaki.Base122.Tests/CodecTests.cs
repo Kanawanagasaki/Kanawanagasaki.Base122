@@ -12,14 +12,14 @@ public class VectorTests
     [Fact]
     public void Encode_HelloWorld_MatchesReference()
     {
-        string encoded = Base122.Encode("hello world"u8);
+        string encoded = Base122Encoder.Encode("hello world"u8);
         Assert.Equal("34192d46633c407737d78d4620", TestHelpers.ToHex(Encoding.UTF8.GetBytes(encoded)));
     }
 
     [Fact]
     public void Encode_Base122Word_MatchesReference()
     {
-        string encoded = Base122.Encode("Base122"u8);
+        string encoded = Base122Encoder.Encode("Base122"u8);
         Assert.Equal("21182e3629446432", TestHelpers.ToHex(Encoding.UTF8.GetBytes(encoded)));
     }
 
@@ -30,8 +30,8 @@ public class VectorTests
         byte[] data = TestHelpers.FromHex(dataHex);
         string expected = TestHelpers.EncodedVectorToText(encodedHex);
 
-        Assert.Equal(expected, Base122.Encode(data));
-        Assert.Equal(expected, Base122.Encode(data.AsSpan()));
+        Assert.Equal(expected, Base122Encoder.Encode(data));
+        Assert.Equal(expected, Base122Encoder.Encode(data.AsSpan()));
     }
 
     [Theory]
@@ -41,8 +41,8 @@ public class VectorTests
         byte[] expected = TestHelpers.FromHex(dataHex);
         string encoded = TestHelpers.EncodedVectorToText(encodedHex);
 
-        Assert.Equal(expected, Base122.Decode(encoded));
-        Assert.Equal(expected, Base122.Decode(encoded.AsSpan()));
+        Assert.Equal(expected, Base122Decoder.Decode(encoded));
+        Assert.Equal(expected, Base122Decoder.Decode(encoded.AsSpan()));
     }
 
     [Theory]
@@ -52,8 +52,8 @@ public class VectorTests
         byte[] expected = TestHelpers.FromHex(dataHex);
         string encoded = TestHelpers.EncodedVectorToText(encodedHex);
 
-        Span<byte> buffer = new byte[Base122.GetMaxDecodedLength(encoded.Length) + 16];
-        Assert.True(Base122.TryDecode(encoded, buffer, out int written));
+        Span<byte> buffer = new byte[Base122Decoder.GetMaxDecodedLength(encoded.Length) + 16];
+        Assert.True(Base122Decoder.TryDecode(encoded, buffer, out int written));
         Assert.Equal(expected.Length, written);
         Assert.Equal(expected, buffer[..written].ToArray());
     }
@@ -63,7 +63,7 @@ public class VectorTests
     public void EncodedOutput_IsValidUtf8_AndNeverContainsIllegalCharacters(string dataHex, string encodedHex)
     {
         byte[] data = TestHelpers.FromHex(dataHex);
-        string encoded = Base122.Encode(data);
+        string encoded = Base122Encoder.Encode(data);
 
         // The encoded hex from Rust is valid UTF-8 by construction; comparing
         // byte forms proves the C# string is the same valid UTF-8 text.
@@ -79,14 +79,14 @@ public class EncodeTests
     [Fact]
     public void Encode_Empty_ReturnsEmptyString()
     {
-        Assert.Equal(string.Empty, Base122.Encode(Array.Empty<byte>()));
-        Assert.Equal(string.Empty, Base122.Encode(Array.Empty<byte>().AsSpan()));
+        Assert.Equal(string.Empty, Base122Encoder.Encode(Array.Empty<byte>()));
+        Assert.Equal(string.Empty, Base122Encoder.Encode(Array.Empty<byte>().AsSpan()));
     }
 
     [Fact]
     public void Encode_NullArray_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => Base122.Encode((byte[])null!));
+        Assert.Throws<ArgumentNullException>(() => Base122Encoder.Encode((byte[])null!));
     }
 
     [Fact]
@@ -95,7 +95,7 @@ public class EncodeTests
         for (int b = 0; b <= 255; b++)
         {
             byte[] data = [(byte)b];
-            Assert.Equal(data, Base122.Decode(Base122.Encode(data)));
+            Assert.Equal(data, Base122Decoder.Decode(Base122Encoder.Encode(data)));
         }
     }
 
@@ -103,7 +103,7 @@ public class EncodeTests
     public void Encode_AllIllegalBytes_MatchesReference()
     {
         byte[] data = TestHelpers.IllegalBytes;
-        string encoded = Base122.Encode(data);
+        string encoded = Base122Encoder.Encode(data);
         Assert.Equal(TestHelpers.EncodedVectorToText("c2824152111938"), encoded);
     }
 
@@ -111,37 +111,37 @@ public class EncodeTests
     public void Encode_RepeatedZeros_HasExpectedLength()
     {
         // 100 zero bytes -> 57 escape pairs + 1 shortened escape = 58 characters.
-        string encoded = Base122.Encode(new byte[100]);
+        string encoded = Base122Encoder.Encode(new byte[100]);
         Assert.Equal(58, encoded.Length);
-        Assert.Equal(58, Base122.GetEncodedLength(new byte[100]));
+        Assert.Equal(58, Base122Encoder.GetEncodedLength(new byte[100]));
     }
 
     [Fact]
     public void Encode_OverloadsWithArrayAndSpan_Agree()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x1234, 1000);
-        Assert.Equal(Base122.Encode(data), Base122.Encode(data.AsSpan()));
+        Assert.Equal(Base122Encoder.Encode(data), Base122Encoder.Encode(data.AsSpan()));
     }
 
     [Fact]
     public void TryEncode_MaxSizeBuffer_SucceedsWithExactCount()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x77, 300);
-        int exact = Base122.GetEncodedLength(data);
-        int max = Base122.GetMaxEncodedLength(data.Length);
+        int exact = Base122Encoder.GetEncodedLength(data);
+        int max = Base122Encoder.GetMaxEncodedLength(data.Length);
 
         Span<char> buffer = new char[max];
-        Assert.True(Base122.TryEncode(data, buffer, out int written));
+        Assert.True(Base122Encoder.TryEncode(data, buffer, out int written));
         Assert.Equal(exact, written);
-        Assert.Equal(Base122.Encode(data), new string(buffer[..written]));
+        Assert.Equal(Base122Encoder.Encode(data), new string(buffer[..written]));
     }
 
     [Fact]
     public void TryEncode_TooSmallBuffer_Fails()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x78, 100);
-        Span<char> buffer = new char[Base122.GetEncodedLength(data) - 1];
-        Assert.False(Base122.TryEncode(data, buffer, out int written));
+        Span<char> buffer = new char[Base122Encoder.GetEncodedLength(data) - 1];
+        Assert.False(Base122Encoder.TryEncode(data, buffer, out int written));
         Assert.Equal(0, written);
     }
 
@@ -149,12 +149,12 @@ public class EncodeTests
     public void TryEncode_TooSmallBuffer_MaxSizeSucceeds()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x79, 100);
-        int max = Base122.GetMaxEncodedLength(data.Length);
-        Assert.InRange(Base122.GetEncodedLength(data), 1, max);
+        int max = Base122Encoder.GetMaxEncodedLength(data.Length);
+        Assert.InRange(Base122Encoder.GetEncodedLength(data), 1, max);
 
         Span<char> buffer = new char[max];
-        Assert.True(Base122.TryEncode(data, buffer, out int written));
-        Assert.Equal(Base122.Encode(data).Length, written);
+        Assert.True(Base122Encoder.TryEncode(data, buffer, out int written));
+        Assert.Equal(Base122Encoder.Encode(data).Length, written);
     }
 }
 
@@ -163,14 +163,14 @@ public class DecodeTests
     [Fact]
     public void Decode_Empty_ReturnsEmptyArray()
     {
-        Assert.Empty(Base122.Decode(string.Empty));
-        Assert.Empty(Base122.Decode(ReadOnlySpan<char>.Empty));
+        Assert.Empty(Base122Decoder.Decode(string.Empty));
+        Assert.Empty(Base122Decoder.Decode(ReadOnlySpan<char>.Empty));
     }
 
     [Fact]
     public void Decode_NullString_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => Base122.Decode((string)null!));
+        Assert.Throws<ArgumentNullException>(() => Base122Decoder.Decode((string)null!));
     }
 
     public static IEnumerable<object[]> InvalidTexts()
@@ -195,8 +195,8 @@ public class DecodeTests
     [MemberData(nameof(InvalidTexts))]
     public void Decode_InvalidCharacter_ThrowsFormat(string invalid)
     {
-        Assert.Throws<FormatException>(() => Base122.Decode(invalid));
-        Assert.Throws<FormatException>(() => Base122.Decode(invalid.AsSpan()));
+        Assert.Throws<FormatException>(() => Base122Decoder.Decode(invalid));
+        Assert.Throws<FormatException>(() => Base122Decoder.Decode(invalid.AsSpan()));
     }
 
     [Theory]
@@ -204,7 +204,7 @@ public class DecodeTests
     public void TryDecode_InvalidCharacter_ReturnsFalse(string invalid)
     {
         Span<byte> buffer = new byte[64];
-        Assert.False(Base122.TryDecode(invalid, buffer, out int written));
+        Assert.False(Base122Decoder.TryDecode(invalid, buffer, out int written));
         Assert.Equal(0, written);
     }
 
@@ -212,19 +212,19 @@ public class DecodeTests
     public void Decode_InvalidCharacter_ReportsPosition()
     {
         // "hello world" encoded, then a corrupted second character.
-        string encoded = Base122.Encode("hello world"u8);
+        string encoded = Base122Encoder.Encode("hello world"u8);
         var chars = encoded.ToArray();
         chars[1] = '\u0100';
-        FormatException ex = Assert.Throws<FormatException>(() => Base122.Decode(new string(chars)));
+        FormatException ex = Assert.Throws<FormatException>(() => Base122Decoder.Decode(new string(chars)));
         Assert.Contains("1", ex.Message);
     }
 
     [Fact]
     public void TryDecode_TooSmallBuffer_Fails()
     {
-        string encoded = Base122.Encode(new byte[100]);
-        Span<byte> buffer = new byte[Base122.Decode(encoded).Length - 1];
-        Assert.False(Base122.TryDecode(encoded, buffer, out int written));
+        string encoded = Base122Encoder.Encode(new byte[100]);
+        Span<byte> buffer = new byte[Base122Decoder.Decode(encoded).Length - 1];
+        Assert.False(Base122Decoder.TryDecode(encoded, buffer, out int written));
         Assert.Equal(0, written);
     }
 
@@ -232,12 +232,12 @@ public class DecodeTests
     public void Decode_MaxSizeBuffer_WritesExactCount()
     {
         byte[] data = TestHelpers.RandomBytesArray(0x42, 256);
-        string encoded = Base122.Encode(data);
-        int max = Base122.GetMaxDecodedLength(encoded.Length);
+        string encoded = Base122Encoder.Encode(data);
+        int max = Base122Decoder.GetMaxDecodedLength(encoded.Length);
         Assert.InRange(data.Length, 1, max);
 
         Span<byte> buffer = new byte[max];
-        Assert.True(Base122.TryDecode(encoded, buffer, out int written));
+        Assert.True(Base122Decoder.TryDecode(encoded, buffer, out int written));
         Assert.Equal(data.Length, written);
         Assert.Equal(data, buffer[..written].ToArray());
     }
@@ -249,8 +249,8 @@ public class DecodeTests
         // trailing partial byte is dropped, so decoding a valid prefix of an
         // encoding yields the original prefix bytes.
         byte[] data = [0x02];
-        string encoded = Base122.Encode(data); // "\u0001\u0780"
-        Assert.Equal(data, Base122.Decode(encoded));
+        string encoded = Base122Encoder.Encode(data); // "\u0001\u0780"
+        Assert.Equal(data, Base122Decoder.Decode(encoded));
     }
 }
 
@@ -266,7 +266,7 @@ public class RoundTripTests
             for (int b = 0; b <= 255; b++)
             {
                 buf[1] = (byte)b;
-                Assert.Equal(buf, Base122.Decode(Base122.Encode(buf)));
+                Assert.Equal(buf, Base122Decoder.Decode(Base122Encoder.Encode(buf)));
             }
         }
     }
@@ -284,7 +284,7 @@ public class RoundTripTests
                 for (int c = 0; c <= 255; c += 11)
                 {
                     buf[2] = (byte)c;
-                    Assert.Equal(buf, Base122.Decode(Base122.Encode(buf)));
+                    Assert.Equal(buf, Base122Decoder.Decode(Base122Encoder.Encode(buf)));
                 }
             }
         }
@@ -302,7 +302,7 @@ public class RoundTripTests
                 foreach (byte c in values)
                 {
                     byte[] data = [a, b, c];
-                    Assert.Equal(data, Base122.Decode(Base122.Encode(data)));
+                    Assert.Equal(data, Base122Decoder.Decode(Base122Encoder.Encode(data)));
                 }
     }
 
@@ -336,20 +336,20 @@ public class RoundTripTests
             }
         }
 
-        string encoded = Base122.Encode(data);
-        byte[] decoded = Base122.Decode(encoded);
+        string encoded = Base122Encoder.Encode(data);
+        byte[] decoded = Base122Decoder.Decode(encoded);
 
         Assert.Equal(data, decoded);
-        Assert.InRange(encoded.Length, Base122.GetEncodedLength(data), Base122.GetMaxEncodedLength(data.Length));
-        Assert.InRange(decoded.Length, 0, Base122.GetMaxDecodedLength(encoded.Length));
+        Assert.InRange(encoded.Length, Base122Encoder.GetEncodedLength(data), Base122Encoder.GetMaxEncodedLength(data.Length));
+        Assert.InRange(decoded.Length, 0, Base122Decoder.GetMaxDecodedLength(encoded.Length));
     }
 
     [Fact]
     public void RoundTrip_LargeRandomPayload()
     {
         byte[] data = TestHelpers.RandomBytesArray(0xDEADBEEF, 1 << 20);
-        string encoded = Base122.Encode(data);
-        byte[] decoded = Base122.Decode(encoded);
+        string encoded = Base122Encoder.Encode(data);
+        byte[] decoded = Base122Decoder.Decode(encoded);
         Assert.Equal(data, decoded);
     }
 
@@ -366,8 +366,8 @@ public class RoundTripTests
                         if (i % 2 == 0)
                             data[i] = TestHelpers.IllegalBytes[i % TestHelpers.IllegalBytes.Length];
 
-                string encoded = Base122.Encode(data);
-                Assert.Equal(encoded.Length, Base122.GetEncodedLength(data));
+                string encoded = Base122Encoder.Encode(data);
+                Assert.Equal(encoded.Length, Base122Encoder.GetEncodedLength(data));
             }
         }
     }
@@ -378,14 +378,14 @@ public class RoundTripTests
         for (int len = 1; len <= 512; len++)
         {
             byte[] data = TestHelpers.RandomBytesArray((ulong)len, len);
-            int actual = Base122.Encode(data).Length;
-            Assert.InRange(actual, 0, Base122.GetMaxEncodedLength(len));
+            int actual = Base122Encoder.Encode(data).Length;
+            Assert.InRange(actual, 0, Base122Encoder.GetMaxEncodedLength(len));
         }
 
         // The bound is tight: 8 bytes -> 10 groups (64 bits) -> at most 10 characters.
-        Assert.Equal(10, Base122.GetMaxEncodedLength(8));
-        Assert.Equal(2, Base122.GetMaxEncodedLength(1));
-        Assert.Equal(0, Base122.GetMaxEncodedLength(0));
+        Assert.Equal(10, Base122Encoder.GetMaxEncodedLength(8));
+        Assert.Equal(2, Base122Encoder.GetMaxEncodedLength(1));
+        Assert.Equal(0, Base122Encoder.GetMaxEncodedLength(0));
     }
 
     [Fact]
@@ -394,12 +394,12 @@ public class RoundTripTests
         for (int len = 1; len <= 512; len++)
         {
             byte[] data = TestHelpers.RandomBytesArray((ulong)len + 999, len);
-            string encoded = Base122.Encode(data);
-            int actual = Base122.Decode(encoded).Length;
-            Assert.InRange(actual, 0, Base122.GetMaxDecodedLength(encoded.Length));
+            string encoded = Base122Encoder.Encode(data);
+            int actual = Base122Decoder.Decode(encoded).Length;
+            Assert.InRange(actual, 0, Base122Decoder.GetMaxDecodedLength(encoded.Length));
         }
 
-        Assert.Equal(0, Base122.GetMaxDecodedLength(0));
-        Assert.Equal(14, Base122.GetMaxDecodedLength(8));
+        Assert.Equal(0, Base122Decoder.GetMaxDecodedLength(0));
+        Assert.Equal(14, Base122Decoder.GetMaxDecodedLength(8));
     }
 }

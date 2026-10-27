@@ -1,12 +1,18 @@
+using System.Buffers;
 using System.Buffers.Binary;
 
 namespace Kanawanagasaki.Base122;
 
 /// <summary>
-/// A streaming Base122 decoder realized as a read-only <see cref="Stream"/>:
-/// it reads Base122 text (UTF-8) from the input stream supplied at
-/// construction and exposes the decoded binary data through
-/// <see cref="Read(System.Span{byte})"/> overloads.
+/// Base122 decoding as a read-only <see cref="Stream"/>: it reads Base122
+/// text (UTF-8) from the input stream supplied at construction and exposes
+/// the decoded binary data through <see cref="Read(System.Span{byte})"/>
+/// overloads.
+/// <para>
+/// The class also hosts the static in-memory decode API
+/// (<see cref="Decode(string)"/>, <see cref="DecodeFromUtf8(ReadOnlySpan{byte})"/>,
+/// including Stream, <see cref="IBufferWriter{Byte}"/> and async sources).
+/// </para>
 /// </summary>
 /// <remarks>
 /// Because the class is a <see cref="Stream"/>, it can pipe into any other
@@ -25,9 +31,10 @@ namespace Kanawanagasaki.Base122;
 public sealed class Base122Decoder : Stream
 {
     private const int DefaultBufferSize = 8192;
+    private const int MaxStackallocBytes = 512;
 
     private readonly Stream _input;
-    private readonly byte[] _buffer;
+    private byte[] _buffer = null!;
     private readonly bool _leaveOpen;
 
     private int _bufferPos;
@@ -41,18 +48,36 @@ public sealed class Base122Decoder : Stream
 
     /// <summary>Creates a decoder that reads Base122 text (UTF-8) from <paramref name="input"/>.</summary>
     /// <remarks>The input stream is disposed together with the decoder.</remarks>
-    public Base122Decoder(Stream input) : this(input, leaveOpen: false) { }
+    public Base122Decoder(Stream input) : this(input, null, leaveOpen: false) { }
 
     /// <summary>Creates a decoder that reads Base122 text (UTF-8) from <paramref name="input"/>.</summary>
     /// <param name="input">The stream supplying the encoded text.</param>
     /// <param name="leaveOpen">When true, the input stream outlives this decoder.</param>
-    public Base122Decoder(Stream input, bool leaveOpen)
+    public Base122Decoder(Stream input, bool leaveOpen) : this(input, null, leaveOpen) { }
+
+    /// <summary>Creates a decoder that reads Base122 text (UTF-8) from <paramref name="input"/>.</summary>
+    /// <param name="input">The stream supplying the encoded text.</param>
+    /// <param name="buffer">
+    /// A caller-provided buffer used to stage input read from
+    /// <paramref name="input"/> before it is decoded — pass e.g.
+    /// <c>ArrayPool&lt;byte&gt;.Shared.Rent(8192)</c> and return it after
+    /// disposal to avoid library-side allocations entirely. When null, an
+    /// 8192-byte buffer is allocated on first use and reused for the
+    /// lifetime of the decoder.
+    /// </param>
+    /// <param name="leaveOpen">When true, the input stream outlives this decoder.</param>
+    public Base122Decoder(Stream input, byte[]? buffer, bool leaveOpen = false)
     {
         ArgumentNullException.ThrowIfNull(input);
+        if (buffer is { Length: 0 })
+            throw new ArgumentOutOfRangeException(nameof(buffer), "The buffer must not be empty.");
         _input = input;
+        _buffer = buffer!;
         _leaveOpen = leaveOpen;
-        _buffer = new byte[DefaultBufferSize];
     }
+
+    /// <summary>Allocates the staging buffer on first use (unless provided by the caller).</summary>
+    private void EnsureBuffer() => _buffer ??= new byte[DefaultBufferSize];
 
     #region Stream contract: read-only, non-seekable
 
@@ -145,6 +170,9 @@ public sealed class Base122Decoder : Stream
     public override int Read(Span<byte> buffer)
     {
         ThrowIfDisposed();
+        if (buffer.IsEmpty)
+            return 0;
+        EnsureBuffer();
 
         int written = 0;
 
@@ -238,6 +266,7 @@ public sealed class Base122Decoder : Stream
             return ValueTask.FromCanceled<int>(cancellationToken);
         if (buffer.IsEmpty)
             return new ValueTask<int>(0);
+        EnsureBuffer();
         return ReadAsyncCore(buffer, cancellationToken);
     }
 
@@ -466,4 +495,296 @@ public sealed class Base122Decoder : Stream
         if (_disposed)
             throw new ObjectDisposedException(nameof(Base122Decoder));
     }
+
+    #region Static in-memory decode API
+
+    /// <summary>
+    /// Decodes a Base122 string back into its original binary form.
+    /// </summary>
+    /// <exception cref="FormatException">
+    /// The input contains a character that cannot occur in Base122 text.
+    /// </exception>
+    public static byte[] Decode(ReadOnlySpan<char> encoded)
+    {
+        if (encoded.IsEmpty)
+            return [];
+
+        int maxByteCount = GetMaxDecodedLength(encoded.Length);
+
+        if (maxByteCount <= MaxStackallocBytes)
+        {
+            Span<byte> buffer = stackalloc byte[MaxStackallocBytes];
+            if (!Base122Core.Decode(encoded, buffer, out int written, out int errorOffset))
+                throw InvalidInput(encoded, errorOffset);
+            return buffer[..written].ToArray();
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(maxByteCount);
+        try
+        {
+            if (!Base122Core.Decode(encoded, rented, out int written, out int errorOffset))
+                throw InvalidInput(encoded, errorOffset);
+            return rented.AsSpan(0, written).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Decodes a Base122 string back into its original binary form.
+    /// </summary>
+    /// <exception cref="FormatException">
+    /// The input contains a character that cannot occur in Base122 text.
+    /// </exception>
+    public static byte[] Decode(string encoded)
+    {
+        ArgumentNullException.ThrowIfNull(encoded);
+        return Decode(encoded.AsSpan());
+    }
+
+    /// <summary>
+    /// Decodes a Base122 text into a caller-provided buffer.
+    /// <paramref name="destination"/> must be at least
+    /// <see cref="GetMaxDecodedLength"/> bytes long.
+    /// </summary>
+    /// <param name="encoded">The Base122 text to decode.</param>
+    /// <param name="destination">The buffer receiving the decoded bytes.</param>
+    /// <param name="bytesWritten">The exact number of decoded bytes on success.</param>
+    /// <returns>
+    /// False when <paramref name="destination"/> is too small or when the input
+    /// contains a character that cannot occur in Base122 text.
+    /// </returns>
+    public static bool TryDecode(ReadOnlySpan<char> encoded, Span<byte> destination, out int bytesWritten)
+    {
+        if (destination.Length < GetMaxDecodedLength(encoded.Length))
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        return Base122Core.Decode(encoded, destination, out bytesWritten, out _);
+    }
+
+    /// <summary>
+    /// Decodes the UTF-8 byte form of a Base122 text back into its original
+    /// binary form — the byte-level counterpart of
+    /// <see cref="Decode(ReadOnlySpan{char})"/>, without materializing any
+    /// string or character data.
+    /// </summary>
+    /// <exception cref="FormatException">
+    /// The input contains a byte that cannot occur in Base122 UTF-8 text (an
+    /// invalid lead byte), an invalid continuation byte, or an escape sequence
+    /// truncated by the end of the input.
+    /// </exception>
+    public static byte[] DecodeFromUtf8(byte[] encoded)
+    {
+        ArgumentNullException.ThrowIfNull(encoded);
+        return DecodeFromUtf8(encoded.AsSpan());
+    }
+
+    /// <summary>
+    /// Decodes the UTF-8 byte form of a Base122 text back into its original
+    /// binary form — the byte-level counterpart of
+    /// <see cref="Decode(ReadOnlySpan{char})"/>, without materializing any
+    /// string or character data.
+    /// </summary>
+    /// <remarks>
+    /// The exact decoded length is computed in O(1) (every input byte carries
+    /// exactly 7 bits, except a single ending shortened escape), so the result
+    /// array is the only allocation.
+    /// </remarks>
+    /// <exception cref="FormatException">
+    /// The input contains a byte that cannot occur in Base122 UTF-8 text (an
+    /// invalid lead byte), an invalid continuation byte, or an escape sequence
+    /// truncated by the end of the input.
+    /// </exception>
+    public static byte[] DecodeFromUtf8(ReadOnlySpan<byte> encoded)
+    {
+        if (encoded.IsEmpty)
+            return [];
+
+        byte[] result = new byte[Base122Core.GetDecodedFromUtf8Length(encoded)];
+        if (!Base122Core.DecodeFromUtf8(encoded, result, out int written, out int errorOffset))
+            throw InvalidUtf8Input(encoded, errorOffset);
+
+        if (written != result.Length)
+        {
+            // Non-canonical (but decodable) input decoded to fewer bytes.
+            return result[..written].ToArray();
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Decodes the UTF-8 byte form of a Base122 text into
+    /// <paramref name="bufferWriter"/>.
+    /// </summary>
+    /// <param name="encoded">The UTF-8 bytes of the Base122 text to decode.</param>
+    /// <param name="bufferWriter">The writer receiving the decoded bytes.</param>
+    /// <returns>The number of decoded bytes written to the writer.</returns>
+    /// <exception cref="FormatException">
+    /// The input contains a byte that cannot occur in Base122 UTF-8 text (an
+    /// invalid lead byte), an invalid continuation byte, or an escape sequence
+    /// truncated by the end of the input.
+    /// </exception>
+    public static int DecodeFromUtf8(ReadOnlySpan<byte> encoded, IBufferWriter<byte> bufferWriter)
+    {
+        ArgumentNullException.ThrowIfNull(bufferWriter);
+
+        Span<byte> span = bufferWriter.GetSpan(GetMaxDecodedFromUtf8Length(encoded.Length));
+        if (!Base122Core.DecodeFromUtf8(encoded, span, out int written, out int errorOffset))
+            throw InvalidUtf8Input(encoded, errorOffset);
+        bufferWriter.Advance(written);
+        return written;
+    }
+
+    /// <summary>
+    /// Decodes the UTF-8 byte form of a Base122 text and writes the decoded
+    /// bytes to <paramref name="destination"/>.
+    /// </summary>
+    /// <param name="encoded">The UTF-8 bytes of the Base122 text to decode.</param>
+    /// <param name="destination">The stream receiving the decoded bytes.</param>
+    /// <returns>The number of decoded bytes written to the stream.</returns>
+    /// <exception cref="FormatException">
+    /// The input contains a byte that cannot occur in Base122 UTF-8 text (an
+    /// invalid lead byte), an invalid continuation byte, or an escape sequence
+    /// truncated by the end of the input.
+    /// </exception>
+    public static int DecodeFromUtf8(ReadOnlySpan<byte> encoded, Stream destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new NotSupportedException("The destination stream must be writable.");
+        if (encoded.IsEmpty)
+            return 0;
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxDecodedFromUtf8Length(encoded.Length));
+        try
+        {
+            if (!Base122Core.DecodeFromUtf8(encoded, rented, out int written, out int errorOffset))
+                throw InvalidUtf8Input(encoded, errorOffset);
+            destination.Write(rented, 0, written);
+            return written;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Asynchronously decodes the UTF-8 byte form of a Base122 text and
+    /// writes the decoded bytes to <paramref name="destination"/> using
+    /// asynchronous I/O.
+    /// </summary>
+    /// <param name="encoded">The UTF-8 bytes of the Base122 text to decode.</param>
+    /// <param name="destination">The stream receiving the decoded bytes.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The number of decoded bytes written to the stream.</returns>
+    /// <exception cref="FormatException">
+    /// The input contains a byte that cannot occur in Base122 UTF-8 text (an
+    /// invalid lead byte), an invalid continuation byte, or an escape sequence
+    /// truncated by the end of the input.
+    /// </exception>
+    public static async Task<int> DecodeFromUtf8Async(ReadOnlyMemory<byte> encoded, Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new NotSupportedException("The destination stream must be writable.");
+        if (encoded.IsEmpty)
+            return 0;
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(GetMaxDecodedFromUtf8Length(encoded.Length));
+        try
+        {
+            if (!Base122Core.DecodeFromUtf8(encoded.Span, rented, out int written, out int errorOffset))
+                throw InvalidUtf8Input(encoded.Span, errorOffset);
+            await destination.WriteAsync(rented.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+            return written;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Decodes the UTF-8 byte form of a Base122 text into a caller-provided buffer.
+    /// <paramref name="destination"/> must be at least
+    /// <see cref="GetMaxDecodedFromUtf8Length"/> bytes long.
+    /// </summary>
+    /// <param name="encoded">The UTF-8 bytes of the Base122 text to decode.</param>
+    /// <param name="destination">The buffer receiving the decoded bytes.</param>
+    /// <param name="bytesWritten">The exact number of decoded bytes on success.</param>
+    /// <returns>
+    /// False when <paramref name="destination"/> is too small or when the input
+    /// contains a byte that cannot occur in Base122 UTF-8 text.
+    /// </returns>
+    public static bool TryDecodeFromUtf8(ReadOnlySpan<byte> encoded, Span<byte> destination, out int bytesWritten)
+    {
+        if (destination.Length < GetMaxDecodedFromUtf8Length(encoded.Length))
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        return Base122Core.DecodeFromUtf8(encoded, destination, out bytesWritten, out _);
+    }
+
+    /// <summary>
+    /// Returns the maximum number of bytes decoding
+    /// <paramref name="byteCount"/> bytes of Base122 UTF-8 text can ever produce.
+    /// </summary>
+    /// <remarks>
+    /// Every input byte carries exactly 7 bits (an escape pair carries 14 bits
+    /// over two bytes), so the bound is 7*byteCount/8.
+    /// </remarks>
+    public static int GetMaxDecodedFromUtf8Length(int byteCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(byteCount);
+        return (int)(7L * byteCount / 8);
+    }
+
+    /// <summary>
+    /// Returns the exact number of bytes <see cref="DecodeFromUtf8(ReadOnlySpan{byte})"/>
+    /// produces for a canonical encoding, computed in O(1).
+    /// </summary>
+    /// <remarks>
+    /// For non-canonical (but decodable) input the result may be larger than
+    /// the actual decoded length; it is still a safe upper bound. Use
+    /// <see cref="TryDecodeFromUtf8"/> to decode without allocating.
+    /// </remarks>
+    public static int GetDecodedFromUtf8Length(ReadOnlySpan<byte> encoded) =>
+        Base122Core.GetDecodedFromUtf8Length(encoded);
+
+    /// <summary>
+    /// Returns the maximum number of bytes decoding
+    /// <paramref name="charCount"/> characters of Base122 text can ever produce.
+    /// </summary>
+    /// <remarks>
+    /// Every character carries at most 14 bits (an escape character holds an
+    /// illegal group plus the following group in a single char), so the bound
+    /// is 7*charCount/4 bytes.
+    /// </remarks>
+    public static int GetMaxDecodedLength(int charCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(charCount);
+        return (int)(7L * charCount / 4);
+    }
+
+    private static FormatException InvalidUtf8Input(ReadOnlySpan<byte> encoded, int errorOffset)
+    {
+        byte b = errorOffset < encoded.Length ? encoded[errorOffset] : (byte)0;
+        return new FormatException($"Invalid Base122 input: invalid byte 0x{b:X2} at index {errorOffset}.");
+    }
+
+    private static FormatException InvalidInput(ReadOnlySpan<char> encoded, int errorOffset)
+    {
+        uint c = errorOffset < encoded.Length ? (uint)encoded[errorOffset] : 0;
+        return new FormatException($"Invalid Base122 input: unexpected character U+{c:X4} at index {errorOffset}.");
+    }
+
+    #endregion
 }
